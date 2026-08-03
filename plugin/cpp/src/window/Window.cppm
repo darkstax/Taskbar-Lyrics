@@ -95,7 +95,10 @@ public:
             .hInstance = dll_instance,
             .lpszClassName = class_name,
         };
-        RegisterClassEx(&wc);
+        // 窗口类注册失败（类名冲突等）直接失败返回，由调用方清理后退出
+        if (!RegisterClassEx(&wc)) {
+            return false;
+        }
         this->hwnd = CreateWindowEx(
             WS_EX_NOPARENTNOTIFY | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
             class_name,
@@ -110,7 +113,13 @@ public:
             dll_instance,
             this
         );
-        return this->hwnd != nullptr;
+        if (this->hwnd == nullptr) {
+            return false;
+        }
+        // 初始定位：任务栏结构变化事件可能较晚/不触发（冒烟实测窗口停留 0x0），
+        // 主动 update 一次保证窗口立即可见（WM_CREATE 已同步完成 Taskbar 初始化）
+        this->update();
+        return true;
     }
 
     auto runner() -> void {

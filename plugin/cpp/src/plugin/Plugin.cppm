@@ -1,6 +1,7 @@
 module;
 
 #include <Windows.h>
+#include <string>
 #include <utility>
 
 export module plugin.Plugin;
@@ -8,6 +9,7 @@ export module plugin.Plugin;
 import plugin.Config;
 import pipe.LyricPipeServer;
 import window.Window;
+import util.Log;
 
 // 应用单例：EXE 形态下由 main.cpp 在主线程调用 run()，
 // 窗口创建与消息循环均运行在主线程（不再使用 detach 线程，避免窗口闪退）。
@@ -49,6 +51,7 @@ public:
     auto run() -> int {
         this->window = new Window();
         if (!this->window->create()) {
+            Log::event(L"窗口创建失败，进程退出 (code 1)");
             MessageBoxW(
                 nullptr,
                 L"任务栏歌词窗口创建失败。",
@@ -61,6 +64,7 @@ public:
             return 1;
         }
 
+        Log::event(L"窗口创建成功 (hwnd " + std::to_wstring(reinterpret_cast<uintptr_t>(this->window->getHWND())) + L")");
         this->pipe = new LyricPipeServer(this->window->getHWND());
         // 主线程 WM_APP+1 处理：从管道取最新歌词缓存 → 写 config → 重绘
         this->window->setLyricSource([this] {
@@ -75,6 +79,7 @@ public:
         this->pipe->start();
 
         this->window->runner();
+        Log::event(L"消息循环结束，进程退出");
         return 0;
     }
 };

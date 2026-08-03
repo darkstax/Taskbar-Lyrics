@@ -21,9 +21,9 @@ export enum TASKBAR_WINDOW_ALIGNMENT {
 };
 
 export struct Config {
-    // 歌词内容
-    std::wstring lyric_primary = L" ";
-    std::wstring lyric_secondary = L" ";
+    // 歌词内容（默认空：Lyrics::onDraw 在 empty 时绘制占位文本）
+    std::wstring lyric_primary = L"";
+    std::wstring lyric_secondary = L"";
     // 通用设置
     std::wstring font_family = L"Microsoft YaHei UI";
     int margin_left = 0;

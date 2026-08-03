@@ -1,5 +1,8 @@
 #include <Windows.h>
+#include <string>
+
 import plugin.Plugin;
+import util.Log;
 
 // 独立 EXE 入口（/SUBSYSTEM:WINDOWS，wWinMain）
 //
@@ -8,6 +11,8 @@ import plugin.Plugin;
 //   2. 创建任务栏歌词窗口（Plugin::run() 内部同步创建）
 //   3. 主线程运行窗口消息循环 —— 窗口生命周期与主线程绑定，不会闪退
 auto WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) -> int {
+    Log::event(L"启动 (PID " + std::to_wstring(GetCurrentProcessId()) + L")");
+
     const auto mutex = CreateMutexW(nullptr, TRUE, L"Local\\Taskbar-Lyrics");
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(
@@ -21,6 +26,7 @@ auto WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) -> int {
     }
 
     const auto result = Plugin::getInstance().run();
+    Log::event(L"退出，返回码 " + std::to_wstring(result));
 
     if (mutex) {
         ReleaseMutex(mutex);

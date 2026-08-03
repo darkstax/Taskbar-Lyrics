@@ -25,6 +25,7 @@ target_sources(taskbar-lyrics PRIVATE
         "src/window/Renderer.cppm"
         "src/window/Lyrics.cppm"
         "src/pipe/LyricPipeServer.cppm"
+        "src/util/Log.cppm"
 )
 
 target_include_directories(taskbar-lyrics PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")

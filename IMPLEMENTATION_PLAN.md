@@ -519,6 +519,7 @@ git commit -m "docs: 更新 README 为新架构说明"
 | 任务栏布局差异（Win11 更新） | 定位偏移 | 复用上游 Taskbar.cppm 的 UIAutomation 逻辑，上游已在跟进 |
 | 暂停时歌词不更新 | 显示陈旧 | state 消息预留，v1 可接受；后续加置灰 |
 | 高 DPI/多显示器 | 位置错乱 | 上游已有"适配高DPI"提交（fork 最新），保留其逻辑 |
+| 构建产物带 Zone.Identifier（MOTW） | 运行弹 SmartScreen"来自其他计算机"警告 | **实施注意事项：** 构建/拷贝的 exe 运行前必须解除该标记（`Unblock-File` 或删 `Zone.Identifier` 备用流）；`scripts/run.ps1` 启动时已自动处理 |
 
 ## 验证命令汇总
 
@@ -531,6 +532,11 @@ cd go-musicfox && GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-
   go build -tags "enable_global_hotkey purego" -o /tmp/musicfox-lyric.exe ./cmd
 
 # 端到端：taskbar-lyrics.exe + musicfox 播放 → 观察任务栏
+
+# 启动前洗属性（构建产物带 Zone.Identifier/MOTW 时运行会弹 SmartScreen 警告，
+# 用 scripts/run.ps1 启动可自动 Unblock-File 解除；-NoStart 只洗不启动）
+powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1 -NoStart
 ```
 
 ## 开放问题

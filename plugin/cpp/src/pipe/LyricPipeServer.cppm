@@ -10,6 +10,8 @@ module;
 
 export module pipe.LyricPipeServer;
 
+import util.Log;
+
 
 // 命名管道歌词服务（Server）
 //
@@ -76,6 +78,7 @@ auto LyricPipeServer::start() -> void {
     if (this->running.exchange(true)) {
         return;
     }
+    Log::event(L"管道服务启动，等待 go-musicfox 连接 " + std::wstring(PIPE_NAME));
     this->thread = std::thread([this] {
         // 管道线程入口：规范初始化 COM（当前路径未直接使用 COM，
         // 为将来扩展保留；线程退出时配对释放）
@@ -89,17 +92,13 @@ auto LyricPipeServer::stop() -> void {
     if (!this->running.exchange(false)) {
         return;
     }
-    // 关闭当前管道句柄（此刻无挂起 IO：runLoop 全程非阻塞，句柄或已被
-    // runLoop 自清，或由本线程关闭后置 INVALID；此处仅提前释放资源）。
-    // 线程退出由 running 标志驱动（非阻塞轮询 ≤50ms 醒来），不依赖
-    // CloseHandle 唤醒阻塞 IO。
-    {
-        std::lock_guard<std::mutex> lock(this->mutex);
-        if (this->pipeHandle != INVALID_HANDLE_VALUE) {
-            CloseHandle(this->pipeHandle);
-            this->pipeHandle = INVALID_HANDLE_VALUE;
-        }
-    }
+    // 不再主动 CloseHandle（Phase 2 收尾审查后删除）：管道句柄由 runLoop
+    // 独占创建并在其所有退出路径自清（pipeHandle == pipe 检查 + 置 INVALID
+    // + CloseHandle）。跨线程关闭存在 use-after-close 窗口期（stop 关闭后
+    // runLoop 仍可能对旧句柄做非阻塞 ReadFile/ConnectNamedPipe，且该句柄
+    // 可能已被系统复用），删除后该风险消除。
+    // 线程退出由 running 标志驱动（非阻塞轮询 ≤50ms 醒来），join 等待线程
+    // 结束即保证句柄已由 runLoop 关闭：无泄漏、无 double-close、无死锁。
     if (this->thread.joinable()) {
         this->thread.join();
     }
@@ -121,7 +120,9 @@ auto LyricPipeServer::runLoop() -> void {
             nullptr
         );
         if (pipe == INVALID_HANDLE_VALUE) {
-            Sleep(1000);
+            // 管道创建失败（如前实例残留未释放）：短等 200ms 后重试
+            Log::event(L"管道创建失败 (error " + std::to_wstring(GetLastError()) + L")，200ms 后重试");
+            Sleep(200);
             continue;
         }
 
@@ -164,7 +165,9 @@ auto LyricPipeServer::runLoop() -> void {
             }
             Sleep(50);
         }
-        if (!connected) {
+        if (connected) {
+            Log::event(L"客户端已连接");
+        } else {
             auto closed = false;
             {
                 std::lock_guard<std::mutex> lock(this->mutex);
@@ -198,6 +201,7 @@ auto LyricPipeServer::runLoop() -> void {
             pending.append(buffer, bytes);
             // 上限保护：缓冲超过 64KB 说明收到超长行，丢弃并断开重连（复用外层断线路径）
             if (pending.size() > MAX_PENDING_BYTES) {
+                Log::event(L"pending 缓冲超过上限 (64KB)，丢弃并断开重连");
                 pending.clear();
                 break;
             }
@@ -209,6 +213,11 @@ auto LyricPipeServer::runLoop() -> void {
             }
         }
 
+        // 客户端断开/出错：记录后回到循环顶部重建管道等待重连
+        // （stop() 置位导致循环退出时不记录，避免停止场景打出误导性的"断开"日志）
+        if (this->running.load()) {
+            Log::event(L"客户端断开，重建管道等待重连");
+        }
         {
             auto closed = false;
             std::lock_guard<std::mutex> lock(this->mutex);
@@ -222,6 +231,7 @@ auto LyricPipeServer::runLoop() -> void {
         }
         // 客户端断开后回到循环顶部重建管道，等待重连
     }
+    Log::event(L"管道服务线程退出");
 }
 
 auto LyricPipeServer::parseLine(const std::string &line) -> void {
@@ -242,8 +252,11 @@ auto LyricPipeServer::parseLine(const std::string &line) -> void {
         // 通知主线程拉取缓存并刷新；PostMessage 可能合并多次，
         // WM_APP+1 处理时总是读最新缓存，天然幂等
         PostMessageW(this->targetWindow, WM_LYRIC_UPDATED, 0, 0);
+    } catch (const std::exception &e) {
+        // 忽略畸形 JSON 行，不中断管道读取；记录错误便于排查
+        Log::event(L"JSON 解析错误，忽略畸形行：" + this->utf8ToWString(e.what()));
     } catch (...) {
-        // 忽略畸形 JSON 行，不中断管道读取
+        Log::event(L"JSON 解析错误，忽略畸形行");
     }
 }
 
