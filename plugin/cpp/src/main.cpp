@@ -20,11 +20,11 @@ auto WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) -> int {
         return 0;
     }
 
-    Plugin::getInstance().run();
+    const auto result = Plugin::getInstance().run();
 
     if (mutex) {
         ReleaseMutex(mutex);
         CloseHandle(mutex);
     }
-    return 0;
+    return result;
 }

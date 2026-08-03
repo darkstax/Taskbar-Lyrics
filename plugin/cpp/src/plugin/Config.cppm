@@ -1,5 +1,6 @@
 module;
 
+#include <Windows.h>
 #include <dwrite.h>
 #include <string>
 #include <unordered_map>

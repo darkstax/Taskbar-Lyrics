@@ -2,9 +2,16 @@
 
 > **For Hermes:** 按本计划逐任务实施，每任务完成后 git commit（中文提交信息）。
 
+> **实施状态（Phase 1 审查后，commit 89c4956 基础上）：** Task 1（移除 BetterNCM 外壳、独立 EXE）与 Task 2 的管道服务部分已完成。已按 Phase 1 审查修正：
+> - 管道名统一为 `\\.\\pipe\\go-musicfox.lyric.v1`（与代码/README 一致，原计划中的 `\\.\\pipe\\musicfox-lyric` 已作废）；
+> - server 语义修正：stop() 置标志 + 锁内 CloseHandle 唤醒 + join，runLoop 写入 pipeHandle 后、ConnectNamedPipe 前重查 running，新句柄自灭，杜绝 join 死锁；
+> - 歌词更新收敛主线程：管道线程只写内部缓存并 PostMessageW(WM_APP+1)，主线程写 config 并重绘（不再跨线程改 config / 调 UIAutomation）；
+> - 窗口消息循环补 WM_DESTROY → PostQuitMessage 干净退出（explorer 重启后由用户重启工具，v1 不做 TaskbarCreated 重建）；
+> - 窗口创建失败检查、JSON 快速过滤健壮化（直接 parse 后按 type 判断）、pending 缓冲 64KB 上限、Config 显式包含 `<Windows.h>`。
+
 **Goal:** 把 Taskbar-Lyrics（BetterNCM 网易云客户端插件）改造为独立的 Windows 任务栏歌词工具，数据源改为 go-musicfox 的歌词输出，使 go-musicfox 播放时在 Windows 11 任务栏显示当前歌词。
 
-**Architecture:** 保留原项目 C++ 渲染/定位层（UIAutomation 定位任务栏 + D2D/DWrite 透明子窗口），砍掉 BetterNCM 插件外壳（DllMain/JS 事件通道），新增两个数据通道：(1) go-musicfox 侧加一个极简歌词输出（命名管道 `\\.\pipe\musicfox-lyric`）；(2) 本工具 C++ 侧新增管道客户端读取并驱动渲染。go-musicfox 的 `internal/lyric/service.go` 已有 `State()` 返回当前行索引+片段，只需加个推送点。
+**Architecture:** 保留原项目 C++ 渲染/定位层（UIAutomation 定位任务栏 + D2D/DWrite 透明子窗口），砍掉 BetterNCM 插件外壳（DllMain/JS 事件通道），新增两个数据通道：(1) go-musicfox 侧加一个极简歌词输出（命名管道 `\\.\pipe\go-musicfox.lyric.v1`）；(2) 本工具 C++ 侧新增管道客户端读取并驱动渲染。go-musicfox 的 `internal/lyric/service.go` 已有 `State()` 返回当前行索引+片段，只需加个推送点。
 
 **Tech Stack:** C++20 (C++ Modules, MSVC/CMake 3.30+), Direct2D/DirectWrite, Win32 UIAutomation, Go 1.26 (go-musicfox 侧)。
 
@@ -50,7 +57,7 @@ plugin/
 
 | 决策点 | 选择 | 理由 |
 |---|---|---|
-| 数据通道 | **命名管道** `\\.\pipe\musicfox-lyric`，JSON 行协议 | 实时、无文件残留、go-musicfox 已在用命名管道（SMTC 同思路） |
+| 数据通道 | **命名管道** `\\.\pipe\go-musicfox.lyric.v1`，JSON 行协议 | 实时、无文件残留、go-musicfox 已在用命名管道（SMTC 同思路） |
 | go-musicfox 输出点 | `internal/ui/player.go` stateChan 循环 + 一个 `LyricPipeWriter` 小部件 | 播放/暂停/切歌状态变化处天然有钩子；歌词行变化在 `UpdatePosition` 驱动下也经此同步 |
 | C++ 侧形态 | 独立 **EXE**（不再做 DLL/插件） | 脱离网易云客户端独立运行 |
 | JS 层 | **整体移除** | 数据源改为管道，不再需要客户端事件 |
@@ -157,7 +164,7 @@ git commit -m "refactor: 移除 BetterNCM 插件外壳，改为独立 EXE 项目
 
 ### Task 2: 新增管道客户端模块
 
-**Objective:** 新建 `src/pipe/LyricPipeClient.cppm`，连接 `\\.\pipe\musicfox-lyric` 并解析 JSON 行，回调解包写入 `config.lyric_primary/secondary`。
+**Objective:** 新建 `src/pipe/LyricPipeClient.cppm`，连接 `\\.\pipe\go-musicfox.lyric.v1` 并解析 JSON 行，回调解包写入 `config.lyric_primary/secondary`。
 
 **Files:**
 - Create: `plugin/cpp/src/pipe/LyricPipeClient.cppm`
@@ -204,7 +211,7 @@ auto LyricPipeClient::start() -> void {
     thread = std::thread([this] {
         while (running) {
             HANDLE pipe = CreateFileW(
-                L"\\\\.\\pipe\\musicfox-lyric", GENERIC_READ, 0,
+                L"\\\\.\\pipe\\go-musicfox.lyric.v1", GENERIC_READ, 0,
                 nullptr, OPEN_EXISTING, 0, nullptr);
             if (pipe == INVALID_HANDLE_VALUE) {
                 Sleep(1000);  // 服务端未启动，重试
@@ -337,7 +344,7 @@ git commit -am "feat: Plugin 接入管道客户端，歌词更新触发重绘"
 
 ### Task 4: go-musicfox 侧——歌词管道输出
 
-**Objective:** go-musicfox 增加 `LyricPipeWriter`，在播放状态/歌词行变化时向 `\\.\pipe\musicfox-lyric` 推送 JSON 行。
+**Objective:** go-musicfox 增加 `LyricPipeWriter`，在播放状态/歌词行变化时向 `\\.\pipe\go-musicfox.lyric.v1` 推送 JSON 行。
 
 > 前置：go-musicfox 源码位于 `~/ai-code/go-musicfox/`（需先 clone 到工作区；或直接操作 `/tmp/gmf-src` 现有 v5.0.1 修复版源码）。本任务修改的是 go-musicfox 自己的仓库，若工作区无源码则先 `git clone https://github.com/go-musicfox/go-musicfox`。
 
@@ -378,7 +385,7 @@ type pipeLyricMsg struct {
 func NewLyricPipeWriter() *LyricPipeWriter { return &LyricPipeWriter{} }
 
 func (w *LyricPipeWriter) connect() error {
-    // CreateFileW("\\\\.\\pipe\\musicfox-lyric", GENERIC_WRITE, ...)
+    // CreateFileW("\\\\.\\pipe\\go-musicfox.lyric.v1", GENERIC_WRITE, ...)
     // 失败则重试（工具可能还没启动）
     return nil
 }
@@ -421,7 +428,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
   go build -tags "enable_global_hotkey purego" -o /tmp/musicfox-lyric.exe ./cmd
 ```
 
-Expected: 编译通过，`strings` 能看到 `musicfox-lyric` 管道名。
+Expected: 编译通过，`strings` 能看到 `go-musicfox.lyric.v1` 管道名。
 
 **Step 4: Commit**（go-musicfox 仓库内）
 
@@ -481,7 +488,7 @@ go build ... -o musicfox-lyric.exe ./cmd
 在 Windows 11 任务栏上显示 go-musicfox 当前播放歌词的独立工具。
 
 ## 架构
-- 数据源：go-musicfox 命名管道 `\\.\pipe\musicfox-lyric`（JSON Lines）
+- 数据源：go-musicfox 命名管道 `\\.\pipe\go-musicfox.lyric.v1`（JSON Lines）
 - 渲染：Direct2D/DirectWrite 透明子窗口，UIAutomation 定位任务栏
 - 独立 EXE，无需网易云客户端 / BetterNCM
 

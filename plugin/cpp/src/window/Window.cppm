@@ -10,9 +10,17 @@ import taskbar.Taskbar;
 import taskbar.Registry;
 import window.Renderer;
 
+// 歌词更新通知消息（LyricPipeServer 管道线程 PostMessageW 到本窗口）。
+// 主线程收到后在 WM_APP+1 分支拉取歌词缓存、写 config 并重绘，
+// 保证 config 写与 UI 读全部收敛在主线程。
+//
+// explorer 重启取舍（v1）：本窗口是 Shell_TrayWnd 的子窗口，explorer 重启
+// 会销毁本窗口，WM_DESTROY → PostQuitMessage 干净退出；v1 不实现
+// TaskbarCreated 消息监听与窗口重建，explorer 重启后由用户重新启动本工具。
 export class Window {
 private:
     HWND hwnd = nullptr;
+    std::function<void()> lyricSource{};
 
     static auto CALLBACK WindowProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) -> LRESULT {
         if (message == WM_CREATE) [[unlikely]] {
@@ -47,6 +55,18 @@ private:
                 ValidateRect(hwnd, nullptr);
                 break;
             }
+            case WM_APP + 1: {
+                // 歌词更新通知（主线程）：拉取管道缓存 → 写 config → 重绘
+                if (this->lyricSource) {
+                    this->lyricSource();
+                }
+                break;
+            }
+            case WM_DESTROY: {
+                // 窗口销毁 → 退出消息循环（explorer 重启等场景的干净退出路径）
+                PostQuitMessage(0);
+                break;
+            }
             default: return DefWindowProc(hwnd, message, wParam, lParam);
         }
         return 0;
@@ -56,16 +76,27 @@ public:
     Renderer renderer{};
     Taskbar taskbar{};
 
-    auto create() -> void {
+    auto getHWND() const -> HWND {
+        return this->hwnd;
+    }
+
+    // 装配歌词更新源（由 Plugin 注入：WM_APP+1 时从管道取缓存、写 config 并 update）
+    auto setLyricSource(const std::function<void()> &callback) -> void {
+        this->lyricSource = callback;
+    }
+
+    // 创建窗口；失败返回 false（不再进入消息循环，由调用方清理后退出）
+    auto create() -> bool {
         const auto dll_instance = GetModuleHandle(nullptr);
         const auto class_name = L"taskbar_lyrics";
-        RegisterClassEx(new WNDCLASSEX{
+        const WNDCLASSEX wc{
             .cbSize = sizeof(WNDCLASSEX),
             .lpfnWndProc = Window::WindowProc,
             .hInstance = dll_instance,
             .lpszClassName = class_name,
-        });
-        CreateWindowEx(
+        };
+        RegisterClassEx(&wc);
+        this->hwnd = CreateWindowEx(
             WS_EX_NOPARENTNOTIFY | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
             class_name,
             nullptr,
@@ -79,6 +110,7 @@ public:
             dll_instance,
             this
         );
+        return this->hwnd != nullptr;
     }
 
     auto runner() -> void {
