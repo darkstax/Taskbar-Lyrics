@@ -1,11 +1,14 @@
+module;
+
+#include <d3d11.h>
+#include <d2d1.h>
+#include <dwrite.h>
+#include <dcomp.h>
+#include <dxgi.h>
+#include <wrl/client.h>
+
 export module window.Renderer;
 
-import <d3d11.h>;
-import <d2d1.h>;
-import <dwrite.h>;
-import <dcomp.h>;
-import <dxgi.h>;
-import <wrl/client.h>;
 import window.Lyrics;
 
 export class Renderer {

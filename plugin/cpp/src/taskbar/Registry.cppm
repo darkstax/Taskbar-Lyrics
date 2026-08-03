@@ -1,8 +1,10 @@
-export module taskbar.Registry;
+module;
 
-import <Windows.h>;
-import <vector>;
-import <functional>;
+#include <Windows.h>
+#include <vector>
+#include <functional>
+
+export module taskbar.Registry;
 
 export class Registry {
 public:

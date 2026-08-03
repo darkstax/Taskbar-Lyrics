@@ -1,10 +1,13 @@
+module;
+
+#include <Windows.h>
+#include <UIAutomation.h>
+#include <wrl/client.h>
+#include <thread>
+#include <functional>
+
 export module taskbar.Taskbar;
 
-import <Windows.h>;
-import <UIAutomation.h>;
-import <wrl/client.h>;
-import <thread>;
-import <functional>;
 import taskbar.Handler;
 import taskbar.Registry;
 

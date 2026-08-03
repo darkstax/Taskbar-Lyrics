@@ -1,5 +1,3 @@
 plugin/cpp/.idea
 plugin/cpp/build
-
-plugin/js/node_modules
-plugin/js/build
+dist/

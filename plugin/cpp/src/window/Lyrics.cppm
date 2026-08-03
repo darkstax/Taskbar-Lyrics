@@ -1,9 +1,12 @@
+module;
+
+#include <d2d1.h>
+#include <dwrite.h>
+#include <wrl/client.h>
+#include <string>
+
 export module window.Lyrics;
 
-import <d2d1.h>;
-import <dwrite.h>;
-import <wrl/client.h>;
-import <string>;
 import plugin.Config;
 
 export class Lyrics {

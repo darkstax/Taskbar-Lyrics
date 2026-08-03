@@ -1,8 +1,10 @@
-export module plugin.Config;
+module;
 
-import <dwrite.h>;
-import <string>;
-import <unordered_map>;
+#include <dwrite.h>
+#include <string>
+#include <unordered_map>
+
+export module plugin.Config;
 
 auto stringToWString(const std::string &str) {
     std::wstring result(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str.c_str(), -1, nullptr, 0), 0);

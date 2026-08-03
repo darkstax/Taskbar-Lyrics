@@ -1,7 +1,10 @@
+module;
+
+#include <Windows.h>
+#include <functional>
+
 export module window.Window;
 
-import <Windows.h>;
-import <functional>;
 import plugin.Config;
 import taskbar.Taskbar;
 import taskbar.Registry;

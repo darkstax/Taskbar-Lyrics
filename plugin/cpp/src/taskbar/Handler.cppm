@@ -1,8 +1,10 @@
-export module taskbar.Handler;
+module;
 
-import <UIAutomation.h>;
-import <atomic>;
-import <functional>;
+#include <UIAutomation.h>
+#include <atomic>
+#include <functional>
+
+export module taskbar.Handler;
 
 export class Handler : public IUIAutomationStructureChangedEventHandler {
 public:
