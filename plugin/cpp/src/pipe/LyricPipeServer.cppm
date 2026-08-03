@@ -1,11 +1,13 @@
 module;
 
 #include <Windows.h>
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 export module pipe.LyricPipeServer;
@@ -15,9 +17,11 @@ import util.Log;
 
 // 命名管道歌词服务（Server）
 //
-// go-musicfox 作为客户端连接本管道并按 JSON Lines 协议推送歌词：
+// go-musicfox 作为客户端连接本管道并按 JSON Lines 协议推送消息：
 //   {"type":"lyric","primary":"当前行","secondary":"下一行","ts":...}
-// 本模块只消费 type == "lyric" 的行。
+//   {"type":"config","config":{"window_alignment":"0","font_family":"...",...}}
+// 本模块消费 type == "lyric"（歌词）与 type == "config"（配置）两种行，
+// 其余 type 忽略。config 消息的值全部为字符串（协议冻结）。
 //
 // 线程模型（Phase 1 审查后收敛）：
 //   - 管道线程：只解析 JSON 行、写入自己的 lastPrimary/lastSecondary 缓存
@@ -49,9 +53,12 @@ private:
     HANDLE pipeHandle = INVALID_HANDLE_VALUE;
 
     HWND targetWindow = nullptr; // 主线程窗口句柄（构造时由 Plugin 传入，主线程创建后不再变）
-    std::mutex lyricMutex{};     // 保护 lastPrimary/lastSecondary（管道线程写、主线程读）
+    std::mutex lyricMutex{};     // 保护 lastPrimary/lastSecondary/lastConfig（管道线程写、主线程读）
     std::wstring lastPrimary{};
     std::wstring lastSecondary{};
+    // config 消息缓存：键值均为 UTF-8 字符串（协议冻结），主线程拉取后逐条 setConfig。
+    // 覆盖语义：同 key 新值覆盖旧值（配置变更以最后一次收到的为准）。
+    std::vector<std::pair<std::string, std::string>> lastConfig{};
 
     static auto utf8ToWString(const std::string &str) -> std::wstring;
     auto parseLine(const std::string &line) -> void;
@@ -72,6 +79,10 @@ public:
 
     // 主线程取走最新歌词缓存（返回拷贝；歌词是短字符串，拷贝成本可忽略）
     auto pullLyric() -> std::pair<std::wstring, std::wstring>;
+
+    // 主线程取走最新 config 缓存（返回拷贝；config 消息不频繁，拷贝成本可忽略；
+    // 无 config 消息时返回空 vector）
+    auto pullConfig() -> std::vector<std::pair<std::string, std::string>>;
 };
 
 auto LyricPipeServer::start() -> void {
@@ -130,6 +141,7 @@ auto LyricPipeServer::runLoop() -> void {
             std::lock_guard<std::mutex> lock(this->mutex);
             this->pipeHandle = pipe;
         }
+        Log::event(L"管道已创建，等待客户端连接");
 
         // 竞态修复（Phase 1 审查·致命1）：句柄已写入、但 stop() 已置 running=false 时，
         // 本线程把句柄从槽位清掉并自行 CloseHandle，再退出循环。
@@ -160,13 +172,18 @@ auto LyricPipeServer::runLoop() -> void {
                 break;
             }
             if (error != ERROR_PIPE_LISTENING) {
-                // 其他错误：视为连接失败，走断线重连路径
+                // 232 = ERROR_NO_DATA：客户端连接后立即断开与轮询窗口的竞态，
+                // 单实例管道不能复用需重建，属正常路径，不记日志；
+                // 其余非预期错误才记录。
+                if (error != ERROR_NO_DATA) {
+                    Log::event(L"ConnectNamedPipe 异常 (error " + std::to_wstring(error) + L")");
+                }
                 break;
             }
             Sleep(50);
         }
         if (connected) {
-            Log::event(L"客户端已连接");
+            Log::event(L"客户端已连接，进入读循环");
         } else {
             auto closed = false;
             {
@@ -187,9 +204,28 @@ auto LyricPipeServer::runLoop() -> void {
         pending.clear();
         while (this->running.load()) {
             DWORD bytes = 0;
-            if (!ReadFile(pipe, buffer, sizeof(buffer), &bytes, nullptr)) {
+            const auto readOk = ReadFile(pipe, buffer, sizeof(buffer), &bytes, nullptr);
+            if (!readOk) {
                 const auto error = GetLastError();
+                // NO_DATA 是 PIPE_NOWAIT 下的正常空读（客户端连接但暂无数据），
+                // 高频轮询下不记日志避免刷屏；仅记录真实错误与断开探测结果。
+                if (error != ERROR_NO_DATA) {
+                    Log::event(L"ReadFile 失败 (error " + std::to_wstring(error) + L")");
+                }
                 if (error == ERROR_NO_DATA) {
+                    // PIPE_NOWAIT 下客户端断开后 ReadFile 可能持续返回
+                    // ERROR_NO_DATA 而不返回 ERROR_BROKEN_PIPE（本机实测：
+                    // 客户端连接后未写数据即退出时，ReadFile 永远 NO_DATA，
+                    // 单实例管道被永久占用，后续客户端全部连接失败）。
+                    // 用 PeekNamedPipe 探测真实连接状态：客户端已断开时
+                    // 其返回 FALSE（ERROR_BROKEN_PIPE），据此退出读循环重建。
+                    DWORD available = 0;
+                    DWORD total = 0;
+                    DWORD remaining = 0;
+                    if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, &total)) {
+                        Log::event(L"PeekNamedPipe 检测到客户端断开 (error " + std::to_wstring(GetLastError()) + L")");
+                        break; // 客户端已断开
+                    }
                     Sleep(20); // 暂无数据，稍后重试
                     continue;
                 }
@@ -236,22 +272,56 @@ auto LyricPipeServer::runLoop() -> void {
 
 auto LyricPipeServer::parseLine(const std::string &line) -> void {
     try {
-        // 直接完整解析后按 type 字段判断（不再做对空白敏感的快速过滤）
+        // 直接完整解析后按 type 字段分支（不再做对空白敏感的快速过滤）
         const auto json = nlohmann::json::parse(line);
-        if (json.value("type", "") != "lyric") {
-            return;
+        const auto type = json.value("type", std::string{});
+        if (type == "lyric") {
+            const auto primary = this->utf8ToWString(json.value("primary", std::string{}));
+            const auto secondary = this->utf8ToWString(json.value("secondary", std::string{}));
+            // 管道线程只更新自己的缓存（锁内短写），不碰 config / 窗口
+            {
+                std::lock_guard<std::mutex> lock(this->lyricMutex);
+                this->lastPrimary = std::move(primary);
+                this->lastSecondary = std::move(secondary);
+            }
+            // 通知主线程拉取缓存并刷新；PostMessage 可能合并多次，
+            // WM_APP+1 处理时总是读最新缓存，天然幂等
+            PostMessageW(this->targetWindow, WM_LYRIC_UPDATED, 0, 0);
+        } else if (type == "config") {
+            // config 消息：{"type":"config","config":{key: string, value: string, ...}}
+            // 只消费 "config" 对象内的字符串键值对，其余键跳过（协议冻结，值全是字符串）。
+            // 覆盖语义：同 key 新值覆盖旧值（配置变更以最后一次收到的为准）。
+            const auto it = json.find("config");
+            if (it == json.end() || !it->is_object()) {
+                return;
+            }
+            std::vector<std::pair<std::string, std::string>> updates;
+            for (auto kv = it->begin(); kv != it->end(); ++kv) {
+                if (kv.value().is_string()) {
+                    updates.emplace_back(kv.key(), kv.value().get<std::string>());
+                }
+            }
+            if (updates.empty()) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(this->lyricMutex);
+                for (auto &[key, value] : updates) {
+                    const auto found = std::find_if(
+                        this->lastConfig.begin(), this->lastConfig.end(),
+                        [&key](const auto &kv) { return kv.first == key; }
+                    );
+                    if (found != this->lastConfig.end()) {
+                        found->second = std::move(value);
+                    } else {
+                        this->lastConfig.emplace_back(std::move(key), std::move(value));
+                    }
+                }
+            }
+            // 与 lyric 共用 WM_APP+1 通知：主线程统一拉缓存、应用配置并刷新窗口
+            PostMessageW(this->targetWindow, WM_LYRIC_UPDATED, 0, 0);
         }
-        const auto primary = this->utf8ToWString(json.value("primary", std::string{}));
-        const auto secondary = this->utf8ToWString(json.value("secondary", std::string{}));
-        // 管道线程只更新自己的缓存（锁内短写），不碰 config / 窗口
-        {
-            std::lock_guard<std::mutex> lock(this->lyricMutex);
-            this->lastPrimary = std::move(primary);
-            this->lastSecondary = std::move(secondary);
-        }
-        // 通知主线程拉取缓存并刷新；PostMessage 可能合并多次，
-        // WM_APP+1 处理时总是读最新缓存，天然幂等
-        PostMessageW(this->targetWindow, WM_LYRIC_UPDATED, 0, 0);
+        // 其他 type 忽略
     } catch (const std::exception &e) {
         // 忽略畸形 JSON 行，不中断管道读取；记录错误便于排查
         Log::event(L"JSON 解析错误，忽略畸形行：" + this->utf8ToWString(e.what()));
@@ -263,6 +333,11 @@ auto LyricPipeServer::parseLine(const std::string &line) -> void {
 auto LyricPipeServer::pullLyric() -> std::pair<std::wstring, std::wstring> {
     std::lock_guard<std::mutex> lock(this->lyricMutex);
     return {this->lastPrimary, this->lastSecondary};
+}
+
+auto LyricPipeServer::pullConfig() -> std::vector<std::pair<std::string, std::string>> {
+    std::lock_guard<std::mutex> lock(this->lyricMutex);
+    return this->lastConfig;
 }
 
 auto LyricPipeServer::utf8ToWString(const std::string &str) -> std::wstring {

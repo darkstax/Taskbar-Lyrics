@@ -66,10 +66,16 @@ public:
 
         Log::event(L"窗口创建成功 (hwnd " + std::to_wstring(reinterpret_cast<uintptr_t>(this->window->getHWND())) + L")");
         this->pipe = new LyricPipeServer(this->window->getHWND());
-        // 主线程 WM_APP+1 处理：从管道取最新歌词缓存 → 写 config → 重绘
+        // 主线程 WM_APP+1 处理：先应用管道下发的配置（主线程执行，保持
+        // "配置写主线程"原则），再取最新歌词写 config 并重绘。顺序上先 config
+        // 后 lyric：配置先应用、歌词后写入，避免字体变化触发无谓重绘；
+        // window->update() 幂等，配置变更自动重算布局/重绘。
         this->window->setLyricSource([this] {
             if (this->pipe == nullptr) {
                 return;
+            }
+            for (const auto &[key, value] : this->pipe->pullConfig()) {
+                setConfig(key, value);
             }
             const auto [primary, secondary] = this->pipe->pullLyric();
             config.lyric_primary = std::move(primary);

@@ -66,7 +66,10 @@ public:
             &format2
         );
 
-        // 第一步：以窗口尺寸创建布局，测量文本高度以计算绘制区域
+        // 第一步：以窗口尺寸创建布局，测量文本高度以计算绘制区域。
+        // 行高说明：NO_WRAP 只禁止自动换行，显式 \n（go-musicfox 桌面歌词风格
+        // 的拼接换行）仍产生多行；DWRITE_TEXT_METRICS.height 为全部行的总高度，
+        // 多行场景直接用它作总高即可。
         this->dwrite->CreateTextLayout(primaryText.data(), static_cast<UINT32>(primaryText.size()), this->format1.Get(), width, height, &this->layout1);
         this->layout1->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         this->layout1->GetMetrics(&this->metrics1);
@@ -78,18 +81,80 @@ public:
             this->metrics2 = {};
         }
 
-        const auto margin = (height - this->metrics1.height - this->metrics2.height) / 2;
+        // 字号自适应：窗口高 = 任务栏高（约 32px），两行 14pt 文本行高约 37px，
+        // 超出时 margin 为负 → rect 溢出被 clip 裁剪（翻译两行显示不全）。
+        // 两行总高超出窗口高时按比例缩小字号（下限 0.6 倍保护可读性），重建
+        // format/layout 后重新测高；无 secondary 时仅按单行判断，同样缩放。
+        auto scale = 1.0f;
+        const auto totalHeight = this->metrics1.height + this->metrics2.height;
+        if (totalHeight > height) {
+            scale = height / totalHeight;
+            if (scale < 0.6f) {
+                scale = 0.6f; // 最小字号保护，避免缩得太小不可读
+            }
+        }
+        if (scale < 1.0f) {
+            // 用缩放后的字号（float）重建 format（成员变量重建后，第二步
+            // createText 绘制时自然生效），同参不同字号。
+            const auto size1 = static_cast<float>(config.size_primary) * scale;
+            const auto size2 = static_cast<float>(config.size_secondary) * scale;
+            this->format1.Reset();
+            this->dwrite->CreateTextFormat(
+                config.font_family.data(),
+                nullptr,
+                config.weight_primary,
+                config.slope_primary,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size1,
+                L"zh-CN",
+                &this->format1
+            );
+            if (hasSecondary) {
+                this->format2.Reset();
+                this->dwrite->CreateTextFormat(
+                    config.font_family.data(),
+                    nullptr,
+                    config.weight_secondary,
+                    config.slope_secondary,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size2,
+                    L"zh-CN",
+                    &this->format2
+                );
+            }
+            // 重建布局并重新测高（缩放后两行总高应 ≤ 窗口高）
+            this->layout1.Reset();
+            this->dwrite->CreateTextLayout(primaryText.data(), static_cast<UINT32>(primaryText.size()), this->format1.Get(), width, height, &this->layout1);
+            this->layout1->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            this->layout1->GetMetrics(&this->metrics1);
+            if (hasSecondary) {
+                this->layout2.Reset();
+                this->dwrite->CreateTextLayout(config.lyric_secondary.data(), static_cast<UINT32>(config.lyric_secondary.size()), this->format2.Get(), width, height, &this->layout2);
+                this->layout2->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                this->layout2->GetMetrics(&this->metrics2);
+            }
+        }
+
+        auto margin = (height - this->metrics1.height - this->metrics2.height) / 2;
+        if (margin < 0.0f) {
+            margin = 0.0f; // 防负：总高仍超窗口时从顶部绘制，避免负 margin 溢出被裁剪
+        }
         const auto rect1 = D2D1::RectF(margin, margin, width - margin, margin + this->metrics1.height);
         D2D1_RECT_F rect2{};
         if (hasSecondary) {
             rect2 = D2D1::RectF(rect1.left, rect1.bottom, rect1.right, rect1.bottom + this->metrics2.height);
         }
 
-        // 第二步：按实际绘制区域重建布局（应用对齐/下划线/删除线）并绘制
-        this->createText(rect1, this->format1.Get(), this->layout1, primaryText, config.align_primary, config.underline_primary, config.strikethrough_primary);
+        // 第二步：按实际绘制区域重建布局（应用对齐/下划线/删除线）并绘制。
+        // 居中模式（window_alignment=2）下窗口横跨整个任务栏，文字强制水平居中
+        // （用户直觉的"歌词在任务栏中间"），其余模式遵循 align_primary/secondary。
+        const auto centerMode = (config.window_alignment == TASKBAR_WINDOW_ALIGNMENT::TASKBAR_WINDOW_ALIGNMENT_CENTER);
+        const auto align1 = centerMode ? DWRITE_TEXT_ALIGNMENT::DWRITE_TEXT_ALIGNMENT_CENTER : config.align_primary;
+        this->createText(rect1, this->format1.Get(), this->layout1, primaryText, align1, config.underline_primary, config.strikethrough_primary);
         this->drawText(rect1, this->layout1.Get(), primaryColor);
         if (hasSecondary) {
-            this->createText(rect2, this->format2.Get(), this->layout2, config.lyric_secondary, config.align_secondary, config.underline_secondary, config.strikethrough_secondary);
+            const auto align2 = centerMode ? DWRITE_TEXT_ALIGNMENT::DWRITE_TEXT_ALIGNMENT_CENTER : config.align_secondary;
+            this->createText(rect2, this->format2.Get(), this->layout2, config.lyric_secondary, align2, config.underline_secondary, config.strikethrough_secondary);
             this->drawText(rect2, this->layout2.Get(), config.color_secondary);
         }
     }
