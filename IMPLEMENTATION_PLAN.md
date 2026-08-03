@@ -2,7 +2,16 @@
 
 > **For Hermes:** 按本计划逐任务实施，每任务完成后 git commit（中文提交信息）。
 
-> **实施状态（Phase 1 审查后，commit 89c4956 基础上）：** Task 1（移除 BetterNCM 外壳、独立 EXE）与 Task 2 的管道服务部分已完成。已按 Phase 1 审查修正：
+> **实施状态（commit 36259b2 / b9a6d21a 基础）：** 全部 6 个 Task 已完成，另完成 Phase 5 增强（翻译推送、窗口配置下发、字号自适应、CENTER 居中语义）。要点：
+>
+> - 翻译方案 A：primary=当前行原文，secondary 优先当前行翻译（LRC/YRC 双路径），无翻译时回落下一行原文；
+> - 窗口配置：`[main.lyric]` 新增 taskbarAlignment/taskbarFontFamily/taskbarFontSizePrimary/taskbarFontSizeSecondary，经管道 `config` 消息下发（值全为字符串，对齐 0/1/2/3），连接成功/重连后自动补发；
+> - 字号自适应（两行超高按比例缩小，下限 0.6）；CENTER=全宽窗口+文字居中；AUTO 自检测（TaskbarAl：开始按钮在左→中间空档，图标居中→左侧空档）；
+> - 管道断开探测：PeekNamedPipe 修复客户端断开后单实例管道被占死；NO_DATA/232 竞态日志降噪；
+> - 用户环境已升级：scoop musicfox.exe → v5.0.1-local-taskbar2，真实播放端到端验证通过。
+>
+> 历史修正记录（Phase 1 审查后）：
+>
 > - 管道名统一为 `\\.\\pipe\\go-musicfox.lyric.v1`（与代码/README 一致，原计划中的 `\\.\\pipe\\musicfox-lyric` 已作废）；
 > - server 语义修正：stop() 置标志 + 锁内 CloseHandle 唤醒 + join，runLoop 写入 pipeHandle 后、ConnectNamedPipe 前重查 running，新句柄自灭，杜绝 join 死锁；
 > - 歌词更新收敛主线程：管道线程只写内部缓存并 PostMessageW(WM_APP+1)，主线程写 config 并重绘（不再跨线程改 config / 调 UIAutomation）；
