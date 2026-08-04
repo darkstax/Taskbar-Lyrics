@@ -39,7 +39,12 @@ private:
             case WM_CREATE: {
                 this->hwnd = hwnd;
                 this->taskbar.initialize();
-                this->taskbar.setListener(std::bind(&Window::update, this));
+                // 结构变化/注册表回调一律 PostMessage 收敛到主线程（WM_APP+2）再执行
+                // update()：UIAutomation 事件线程与注册表监听线程不得直接跨进程查询
+                // explorer（右键菜单模态期间会阻塞 RPC，反复触发可致 explorer 卡死）。
+                this->taskbar.setListener([this] {
+                    PostMessageW(this->hwnd, WM_APP + 2, 0, 0);
+                });
                 this->renderer.onCreate(hwnd);
                 break;
             }
@@ -61,6 +66,16 @@ private:
                     this->lyricSource();
                 }
                 break;
+            }
+            case WM_APP + 2: {
+                // 任务栏结构变化/注册表变更通知（已收敛到主线程）→ 重新定位
+                this->update();
+                break;
+            }
+            case WM_NCHITTEST: {
+                // 点击穿透：命中测试透明，鼠标事件全部落回任务栏（右键菜单正常）。
+                // WS_EX_TRANSPARENT 只影响同线程绘制顺序，不提供点击穿透。
+                return HTTRANSPARENT;
             }
             case WM_DESTROY: {
                 // 窗口销毁 → 退出消息循环（explorer 重启等场景的干净退出路径）
