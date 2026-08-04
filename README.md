@@ -22,6 +22,25 @@ cmake --build --preset x64-release
 
 ## 使用
 
+支持两种模式：**安装模式**（推荐，musicfox 可自动拉起）与**便携模式**。
+
+### 安装模式
+
+```powershell
+pwsh -File .\scripts\install.ps1            # 安装到 %LOCALAPPDATA%\Programs\Taskbar-Lyrics + 开机自启
+pwsh -File .\scripts\install.ps1 -NoAutostart  # 跳过开机自启
+pwsh -File .\scripts\uninstall.ps1         # 卸载
+```
+
+- 安装后 go-musicfox（`taskbarPipe=true` 时）启动会自动搜索并拉起本工具，无需手动启动
+- 搜索顺序：`taskbarPipeBin` 配置 → 安装目录 → musicfox 同目录 → PATH
+
+### 便携模式
+
+把 `taskbar-lyrics.exe` 放到任意目录直接运行即可（与安装模式互斥，安装会替换为同一份程序）。
+
+### 手动启动
+
 1. 启动 `taskbar-lyrics.exe`（单实例，重复启动会提示已在运行）
 2. 启动 go-musicfox（需包含歌词管道输出功能的版本）播放歌曲
 3. 任务栏实时显示当前歌词与下一行歌词
