@@ -1,11 +1,14 @@
 # Taskbar-Lyrics (go-musicfox 适配版)
 
-在 Windows 11 任务栏上显示 go-musicfox 当前播放歌词的独立工具。
+在 Windows 11 任务栏上显示 go-musicfox 当前播放歌词的独立工具（含歌词翻译）。
 
 ## 架构
 
-- 数据源：go-musicfox 通过命名管道 `\\.\pipe\go-musicfox.lyric.v1` 推送歌词（JSON Lines：`{"type":"lyric","primary":"...","secondary":"..."}`）
-- 渲染：Direct2D/DirectWrite 透明子窗口，UIAutomation 定位任务栏
+- **数据源**：go-musicfox 通过命名管道 `\\.\pipe\go-musicfox.lyric.v1` 推送消息
+  - `{"type":"lyric","primary":"当前行","secondary":"翻译或下一行"}`——`secondary` 优先当前行翻译（外语歌显示原文+翻译两行），无翻译时为下一行原文
+  - `{"type":"config","config":{...}}`——窗口配置下发（对齐/字体/字号，值全为字符串）
+- **渲染**：D2D HwndRenderTarget 直接绘制窗口客户区 + LWA_COLORKEY 颜色键透明（黑色键色 + 灰度抗锯齿）；歌词更新路径直接调用 onPaint（任务栏右键菜单模态会抑制 WM_PAINT 派发，直接绘制可绕过——菜单弹出期间歌词持续流动）
+- **窗口**：独立顶层窗口（TOPMOST/TOOLWINDOW/NOACTIVATE/LAYERED + `WM_NCHITTEST→HTTRANSPARENT` 点击穿透），UIAutomation 定位任务栏（布局独立线程测量，主线程永不阻塞）
 - 独立 EXE，无需网易云客户端 / BetterNCM
 
 ## 构建
@@ -39,11 +42,24 @@ pwsh -File .\scripts\uninstall.ps1         # 卸载
 
 把 `taskbar-lyrics.exe` 放到任意目录直接运行即可（与安装模式互斥，安装会替换为同一份程序）。
 
+### go-musicfox 配置（`config.toml` 的 `[main.lyric]` 段）
+
+```toml
+taskbarPipe = true              # 开启任务栏歌词输出（musicfox 会自动拉起本工具）
+taskbarAlignment = "auto"       # 对齐：auto(自检测)/left/center/right
+taskbarFontFamily = "Microsoft YaHei UI"  # 字体
+taskbarFontSizePrimary = 14     # 原文行字号
+taskbarFontSizeSecondary = 14   # 翻译/下一行字号
+```
+
+- `auto` 自检测：任务栏图标居中 → 歌词在左侧空档；开始按钮在左 → 歌词在中间空档
+- 改配置后重启 musicfox 生效
+
 ### 手动启动
 
 1. 启动 `taskbar-lyrics.exe`（单实例，重复启动会提示已在运行）
-2. 启动 go-musicfox（需包含歌词管道输出功能的版本）播放歌曲
-3. 任务栏实时显示当前歌词与下一行歌词
+2. 启动 go-musicfox（需包含歌词管道输出功能的版本，见上文配置）播放歌曲
+3. 任务栏实时显示当前歌词（外语歌含翻译）
 
 ## 运行注意事项（MOTW）
 
@@ -63,4 +79,7 @@ SmartScreen / "下载文件"警告——本工具为自建 EXE，属误报，运
 
 ## 已知取舍（v1）
 
-- **explorer 重启**：歌词窗口是任务栏（Shell_TrayWnd）的子窗口，explorer 重启会销毁该窗口，工具随即经 `WM_DESTROY` 干净退出。v1 不实现 `TaskbarCreated` 消息监听与窗口重建，explorer 重启后请手动重新启动本工具。
+- **explorer 重启**：歌词窗口是独立顶层窗口（非任务栏子窗口），explorer 重启时窗口存活，
+  布局线程会自动重测任务栏位置；若窗口因故销毁则经 `WM_DESTROY` 干净退出，需手动重启本工具。
+- **任务栏右键菜单模态**：菜单弹出期间歌词持续流动（直接 onPaint 绕过 WM_PAINT 抑制）；
+  反复右键不会卡死 explorer（UIA 查询全部在独立布局线程，主线程不阻塞）。
