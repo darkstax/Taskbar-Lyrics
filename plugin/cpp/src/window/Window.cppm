@@ -1,7 +1,10 @@
 module;
 
 #include <Windows.h>
+#define _WIN32_IE 0x0600 // SHSTOCKICONINFO/SIID_* 需要
 #include <windowsx.h>
+#include <shellapi.h>
+#include <ShlObj.h>
 #include <functional>
 #include <mutex>
 #include <condition_variable>
@@ -43,11 +46,20 @@ private:
     bool layoutStop = false;
     Taskbar::TaskbarLayout lastLayout{};
 
-    // 垂直任务栏模式（applyLayout 检测方向后设置；WM_NCHITTEST 据此切换
-    // 点击穿透/可拖动）与拖动状态
+    // 垂直任务栏模式（applyLayout 检测方向后设置；锁定/解锁只作用于垂直模式，
+    // 水平模式的状态栏歌词永远保持透明+穿透+自动定位）与拖动状态
     bool verticalMode = false;
     bool dragging = false;
     POINT dragOffset{};
+
+    // 锁定状态：锁定=透明底+点击穿透（默认）；解锁=半透明底+可拖动
+    bool locked = true;
+
+    // 托盘图标回调消息（WM_APP+4）与菜单命令 ID
+    static constexpr UINT WM_TRAY = WM_APP + 4;
+    static constexpr UINT IDM_LOCK = 1;
+    static constexpr UINT IDM_UNLOCK = 2;
+    static constexpr UINT IDM_EXIT = 3;
 
     static auto CALLBACK WindowProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) -> LRESULT {
         if (message == WM_CREATE) [[unlikely]] {
@@ -72,6 +84,12 @@ private:
                     this->update();
                 });
                 this->renderer.onCreate(hwnd);
+                // 锁定状态与托盘图标
+                this->locked = this->loadLocked();
+                if (!this->locked) {
+                    SetLayeredWindowAttributes(hwnd, 0, 210, LWA_ALPHA);
+                }
+                this->addTrayIcon();
                 break;
             }
             case WM_SIZE: {
@@ -104,13 +122,12 @@ private:
                 break;
             }
             case WM_NCHITTEST: {
-                // 水平模式：点击穿透（鼠标事件落回任务栏）；
-                // 垂直模式：可拖动（歌词条在任务栏外侧，拦截鼠标用于拖动）
-                return this->verticalMode ? HTCLIENT : HTTRANSPARENT;
+                // 锁定/水平模式：点击穿透；仅垂直模式解锁时可拖动
+                return (this->verticalMode && !this->locked) ? HTCLIENT : HTTRANSPARENT;
             }
             case WM_LBUTTONDOWN: {
-                // 垂直模式拖动开始（记录偏移 + 捕获鼠标）
-                if (this->verticalMode) {
+                // 仅垂直模式解锁状态拖动开始（记录偏移 + 捕获鼠标）
+                if (this->verticalMode && !this->locked) {
                     this->dragging = true;
                     this->dragOffset.x = GET_X_LPARAM(lParam);
                     this->dragOffset.y = GET_Y_LPARAM(lParam);
@@ -148,7 +165,34 @@ private:
             }
             case WM_DESTROY: {
                 // 窗口销毁 → 退出消息循环（explorer 重启等场景的干净退出路径）
+                this->removeTrayIcon();
                 PostQuitMessage(0);
+                break;
+            }
+            case WM_TRAY: {
+                // 托盘图标回调：右键弹菜单（锁定/解锁/退出）
+                if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+                    HMENU menu = CreatePopupMenu();
+                    AppendMenuW(menu, MF_STRING | (this->locked ? MF_CHECKED : 0), IDM_LOCK, L"锁定歌词（透明+穿透）");
+                    AppendMenuW(menu, MF_STRING | (this->locked ? 0 : MF_CHECKED), IDM_UNLOCK, L"解锁歌词（可拖动）");
+                    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(menu, MF_STRING, IDM_EXIT, L"退出");
+                    POINT pt{};
+                    GetCursorPos(&pt);
+                    SetForegroundWindow(hwnd);
+                    const auto cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, nullptr);
+                    DestroyMenu(menu);
+                    if (cmd == IDM_LOCK) {
+                        this->setLocked(true);
+                    } else if (cmd == IDM_UNLOCK) {
+                        this->setLocked(false);
+                    } else if (cmd == IDM_EXIT) {
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    }
+                } else if (lParam == WM_LBUTTONDBLCLK) {
+                    // 双击托盘：切换锁定/解锁
+                    this->setLocked(!this->locked);
+                }
                 break;
             }
             default: return DefWindowProc(hwnd, message, wParam, lParam);
@@ -162,6 +206,68 @@ public:
 
     auto getHWND() const -> HWND {
         return this->hwnd;
+    }
+
+    // 锁定状态记忆（注册表 HKCU\Software\Taskbar-Lyrics）
+    static auto loadLocked() -> bool {
+        HKEY key = nullptr;
+        DWORD value = 1; // 默认锁定
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Taskbar-Lyrics", 0, KEY_READ, &key) == ERROR_SUCCESS) {
+            DWORD size = sizeof(value);
+            DWORD type = 0;
+            if (RegQueryValueExW(key, L"Locked", nullptr, &type, reinterpret_cast<BYTE *>(&value), &size) != ERROR_SUCCESS) {
+                value = 1;
+            }
+            RegCloseKey(key);
+        }
+        return value != 0;
+    }
+
+    static auto saveLocked(const bool locked) -> void {
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Taskbar-Lyrics", 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+            const auto value = locked ? 1UL : 0UL;
+            RegSetValueExW(key, L"Locked", 0, REG_DWORD, reinterpret_cast<const BYTE *>(&value), sizeof(value));
+            RegCloseKey(key);
+        }
+    }
+
+    // 切换/应用锁定状态（仅影响垂直模式：锁定=透明+穿透+自动定位，
+    // 解锁=半透明底+可拖动；水平模式始终为锁定行为）
+    auto setLocked(const bool locked) -> void {
+        this->locked = locked;
+        this->saveLocked(locked);
+        if (this->verticalMode) {
+            if (locked) {
+                SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+                this->update(); // 恢复自动定位（贴边/记忆位置）
+            } else {
+                SetLayeredWindowAttributes(this->hwnd, 0, 210, LWA_ALPHA);
+            }
+            this->renderer.onPaint();
+        }
+    }
+
+    // 托盘图标（右键菜单：锁定/解锁/退出）；图标用系统音乐图标
+    auto addTrayIcon() -> void {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = this->hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uCallbackMessage = WM_TRAY;
+        wcscpy_s(nid.szTip, L"Taskbar-Lyrics");
+        // 图标：优先系统音乐图标（部分环境不可用时退回应用图标）
+        nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+        Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+
+    auto removeTrayIcon() -> void {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = this->hwnd;
+        nid.uID = 1;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
     }
 
     // 装配歌词更新源（由 Plugin 注入：WM_APP+1 时从管道取缓存、写 config 并 update）
@@ -317,8 +423,15 @@ public:
         const auto frameH = taskbarFrame.bottom - taskbarFrame.top;
         if (frameH > frameW && frameW > 0 && frameH > 0) {
             this->verticalMode = true;
-            // 垂直模式：LWA_ALPHA 整窗半透明（无颜色键穿透，整窗可拖动）
-            SetLayeredWindowAttributes(this->hwnd, 0, 210, LWA_ALPHA);
+            // 垂直模式：按锁定状态应用分层属性（锁定=透明，解锁=半透明可拖）
+            if (this->locked) {
+                SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+            } else {
+                SetLayeredWindowAttributes(this->hwnd, 0, 210, LWA_ALPHA);
+                // 解锁：位置自由，布局心跳不干预定位
+                this->renderer.onPaint();
+                return;
+            }
             // 拖动中不干预位置（布局心跳 2s 一次，拖动期间跳过）
             if (this->dragging) {
                 return;
@@ -353,8 +466,10 @@ public:
             return;
         }
 
-        this->verticalMode = false;
         // 水平模式：恢复颜色键透明（点击穿透不挡任务栏）
+        SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+        this->verticalMode = false;
+        // 水平模式：永远透明+穿透+自动定位（不受锁定状态影响）
         SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
         const auto &trayFrameRect = layout.tray;
         const auto &widgetsButtonRect = layout.widgets;
