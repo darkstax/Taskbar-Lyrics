@@ -1,6 +1,7 @@
 module;
 
 #include <Windows.h>
+#include <windowsx.h>
 #include <functional>
 #include <mutex>
 #include <condition_variable>
@@ -41,6 +42,12 @@ private:
     bool layoutDirty = false;
     bool layoutStop = false;
     Taskbar::TaskbarLayout lastLayout{};
+
+    // 垂直任务栏模式（applyLayout 检测方向后设置；WM_NCHITTEST 据此切换
+    // 点击穿透/可拖动）与拖动状态
+    bool verticalMode = false;
+    bool dragging = false;
+    POINT dragOffset{};
 
     static auto CALLBACK WindowProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) -> LRESULT {
         if (message == WM_CREATE) [[unlikely]] {
@@ -97,8 +104,47 @@ private:
                 break;
             }
             case WM_NCHITTEST: {
-                // 点击穿透：命中测试透明，鼠标事件全部落回任务栏（右键菜单正常）。
-                return HTTRANSPARENT;
+                // 水平模式：点击穿透（鼠标事件落回任务栏）；
+                // 垂直模式：可拖动（歌词条在任务栏外侧，拦截鼠标用于拖动）
+                return this->verticalMode ? HTCLIENT : HTTRANSPARENT;
+            }
+            case WM_LBUTTONDOWN: {
+                // 垂直模式拖动开始（记录偏移 + 捕获鼠标）
+                if (this->verticalMode) {
+                    this->dragging = true;
+                    this->dragOffset.x = GET_X_LPARAM(lParam);
+                    this->dragOffset.y = GET_Y_LPARAM(lParam);
+                    SetCapture(hwnd);
+                }
+                break;
+            }
+            case WM_MOUSEMOVE: {
+                if (this->dragging && (wParam & MK_LBUTTON)) {
+                    RECT rc{};
+                    GetWindowRect(hwnd, &rc);
+                    const auto x = GET_X_LPARAM(lParam);
+                    const auto y = GET_Y_LPARAM(lParam);
+                    MoveWindow(
+                        hwnd,
+                        rc.left + x - this->dragOffset.x,
+                        rc.top + y - this->dragOffset.y,
+                        rc.right - rc.left,
+                        rc.bottom - rc.top,
+                        false
+                    );
+                }
+                break;
+            }
+            case WM_LBUTTONUP: {
+                if (this->dragging) {
+                    this->dragging = false;
+                    ReleaseCapture();
+                    // 记忆拖动后的完整位置（注册表，布局心跳不再贴边）
+                    RECT rc{};
+                    GetWindowRect(hwnd, &rc);
+                    this->saveVerticalPos(rc.left, rc.top);
+                }
+                break;
             }
             case WM_DESTROY: {
                 // 窗口销毁 → 退出消息循环（explorer 重启等场景的干净退出路径）
@@ -143,10 +189,11 @@ public:
             // 顶层窗口不受影响；TOPMOST 保证不被任务栏遮挡，TOOLWINDOW 不进
             // 任务栏/Alt-Tab，NOACTIVATE+HTTRANSPARENT 保证点击穿透不抢焦点。
             // 注：GDI 渲染路径（HwndRenderTarget）不需要 NOREDIRECTIONBITMAP。
-            // LayeredWindow（UpdateLayeredWindow 自绘位图，逐像素 alpha 透明）：
-            // TOPMOST 保证不被任务栏遮挡，TOOLWINDOW 不进任务栏/Alt-Tab，
-            // NOACTIVATE+HTTRANSPARENT 保证点击穿透不抢焦点。
-            WS_EX_NOPARENTNOTIFY | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+            // LayeredWindow：TOPMOST 保证不被任务栏遮挡，TOOLWINDOW 不进
+            // 任务栏/Alt-Tab，NOACTIVATE+HTTRANSPARENT 保证点击穿透不抢焦点。
+            // 注：不用 WS_EX_TRANSPARENT——它在本系统会导致命中测试穿透
+            // （可拖动模式失效），穿透由 WM_NCHITTEST 返回 HTTRANSPARENT 实现。
+            WS_EX_NOPARENTNOTIFY | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             class_name,
             nullptr,
             WS_POPUP | WS_VISIBLE,
@@ -170,6 +217,33 @@ public:
         // 主动 update 一次保证窗口立即可见（WM_CREATE 已同步完成 Taskbar 初始化）
         this->update();
         return true;
+    }
+
+    // 垂直任务栏模式下歌词条的拖动位置记忆（注册表 HKCU\Software\Taskbar-Lyrics）
+    // 返回 true 且 x/y 有效时表示用户已自定义位置（布局心跳不再贴边）
+    static auto loadVerticalPos(LONG &x, LONG &y) -> bool {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Taskbar-Lyrics", 0, KEY_READ, &key) != ERROR_SUCCESS) {
+            return false;
+        }
+        bool ok = false;
+        DWORD type = 0;
+        DWORD size = sizeof(x);
+        if (RegQueryValueExW(key, L"VerticalPosX", nullptr, &type, reinterpret_cast<BYTE *>(&x), &size) == ERROR_SUCCESS &&
+            RegQueryValueExW(key, L"VerticalPosY", nullptr, &type, reinterpret_cast<BYTE *>(&y), &size) == ERROR_SUCCESS) {
+            ok = true;
+        }
+        RegCloseKey(key);
+        return ok;
+    }
+
+    static auto saveVerticalPos(const LONG x, const LONG y) -> void {
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Taskbar-Lyrics", 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+            RegSetValueExW(key, L"VerticalPosX", 0, REG_DWORD, reinterpret_cast<const BYTE *>(&x), sizeof(x));
+            RegSetValueExW(key, L"VerticalPosY", 0, REG_DWORD, reinterpret_cast<const BYTE *>(&y), sizeof(y));
+            RegCloseKey(key);
+        }
     }
 
     // 停止布局线程（析构时调用；等待至多一次测量完成）
@@ -235,6 +309,53 @@ public:
             return;
         }
         const auto &taskbarFrame = layout.frame;
+
+        // 垂直任务栏适配（Windows 11 26300+ 原生支持任务栏在左/右/上）：
+        // 垂直任务栏（高>宽）没有水平空间放两行歌词，歌词条贴在任务栏内侧
+        // 的屏幕边缘（横排两行，保持可读性）。检测方向后走独立布局。
+        const auto frameW = taskbarFrame.right - taskbarFrame.left;
+        const auto frameH = taskbarFrame.bottom - taskbarFrame.top;
+        if (frameH > frameW && frameW > 0 && frameH > 0) {
+            this->verticalMode = true;
+            // 垂直模式：LWA_ALPHA 整窗半透明（无颜色键穿透，整窗可拖动）
+            SetLayeredWindowAttributes(this->hwnd, 0, 210, LWA_ALPHA);
+            // 拖动中不干预位置（布局心跳 2s 一次，拖动期间跳过）
+            if (this->dragging) {
+                return;
+            }
+            // 垂直任务栏：歌词条默认贴任务栏内侧（方案A），可拖动、位置记忆。
+            const auto screenW = GetSystemMetrics(SM_CXSCREEN);
+            const auto screenH = GetSystemMetrics(SM_CYSCREEN);
+            const auto lyricW = 540L;
+            const auto lyricH = 40L;
+            const auto gap = 4L; // 与任务栏的间距
+            // 垂直位置：用户拖动的记忆位置优先（完整 x/y，自由模式）；
+            // 无记忆时默认贴任务栏内侧、屏幕顶部下方 150px（避开顶部 dock 栏）
+            LONG savedX = 0;
+            LONG savedY = 0;
+            const auto hasSaved = this->loadVerticalPos(savedX, savedY);
+            LONG posX = 0;
+            LONG posY = 150L;
+            if (hasSaved) {
+                posX = savedX;
+                posY = savedY;
+            } else {
+                if (taskbarFrame.left >= screenW / 2) {
+                    posX = taskbarFrame.left - lyricW - gap; // 任务栏在右侧：贴左
+                } else {
+                    posX = taskbarFrame.right + gap; // 任务栏在左侧：贴右
+                }
+            }
+            const auto w = min(lyricW, max(0L, screenW - posX - gap));
+            MoveWindow(this->hwnd, posX, posY, w, lyricH, false);
+            RedrawWindow(this->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            this->renderer.onPaint();
+            return;
+        }
+
+        this->verticalMode = false;
+        // 水平模式：恢复颜色键透明（点击穿透不挡任务栏）
+        SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
         const auto &trayFrameRect = layout.tray;
         const auto &widgetsButtonRect = layout.widgets;
         const auto &taskListRect = layout.taskList;
