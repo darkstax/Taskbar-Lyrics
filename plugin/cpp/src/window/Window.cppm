@@ -5,12 +5,14 @@ module;
 #include <mutex>
 #include <condition_variable>
 #include <thread>
+#include <string>
 
 export module window.Window;
 
 import plugin.Config;
 import taskbar.Taskbar;
 import taskbar.Registry;
+import util.Log;
 import window.Renderer;
 
 // 歌词更新通知消息（LyricPipeServer 管道线程 PostMessageW 到本窗口）。
@@ -78,10 +80,14 @@ private:
                 break;
             }
             case WM_APP + 1: {
-                // 歌词更新通知（主线程）：拉取管道缓存 → 写 config → 重绘
+                // 歌词更新通知（主线程）：拉取管道缓存 → 写 config → 直接重绘。
+                // 注意：必须直接调用 renderer.onPaint() 而非依赖 RedrawWindow→
+                // WM_PAINT——任务栏右键菜单模态会抑制 WM_PAINT 派发（实测
+                // 菜单期间 paint 停止、关闭后恢复），直接绘制绕过该机制。
                 if (this->lyricSource) {
                     this->lyricSource();
                 }
+                this->renderer.onPaint();
                 break;
             }
             case WM_APP + 3: {
@@ -92,7 +98,6 @@ private:
             }
             case WM_NCHITTEST: {
                 // 点击穿透：命中测试透明，鼠标事件全部落回任务栏（右键菜单正常）。
-                // WS_EX_TRANSPARENT 只影响同线程绘制顺序，不提供点击穿透。
                 return HTTRANSPARENT;
             }
             case WM_DESTROY: {
@@ -133,15 +138,23 @@ public:
             return false;
         }
         this->hwnd = CreateWindowEx(
-            WS_EX_NOPARENTNOTIFY | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+            // 独立顶层窗口（非任务栏子窗口）：右键菜单模态时 explorer 会暂停
+            // 任务栏子窗口的 DComp 合成（歌词冻结、菜单关闭后跳变），
+            // 顶层窗口不受影响；TOPMOST 保证不被任务栏遮挡，TOOLWINDOW 不进
+            // 任务栏/Alt-Tab，NOACTIVATE+HTTRANSPARENT 保证点击穿透不抢焦点。
+            // 注：GDI 渲染路径（HwndRenderTarget）不需要 NOREDIRECTIONBITMAP。
+            // LayeredWindow（UpdateLayeredWindow 自绘位图，逐像素 alpha 透明）：
+            // TOPMOST 保证不被任务栏遮挡，TOOLWINDOW 不进任务栏/Alt-Tab，
+            // NOACTIVATE+HTTRANSPARENT 保证点击穿透不抢焦点。
+            WS_EX_NOPARENTNOTIFY | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             class_name,
             nullptr,
-            WS_CHILD | WS_VISIBLE,
+            WS_POPUP | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            Taskbar::getHWND(),
+            nullptr,
             nullptr,
             dll_instance,
             this
@@ -263,9 +276,13 @@ public:
         offset += config.margin_left;
         width -= config.margin_right + offset;
         height += taskbarFrame.bottom - taskbarFrame.top;
+        // 顶层窗口使用绝对屏幕坐标（任务栏顶部）；子窗口时代 y=0 相对任务栏
+        const auto posY = taskbarFrame.top;
 
         BringWindowToTop(this->hwnd);
-        MoveWindow(this->hwnd, offset, 0, width, height, false);
+        MoveWindow(this->hwnd, offset, posY, width, height, false);
         RedrawWindow(this->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        // LayeredWindow 首次显示与位置变化后需要主动提交位图（WM_PAINT 不保证触发）
+        this->renderer.onPaint();
     }
 };

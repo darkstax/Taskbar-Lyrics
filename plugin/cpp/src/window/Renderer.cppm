@@ -1,105 +1,68 @@
 module;
 
-#include <d3d11.h>
 #include <d2d1.h>
 #include <dwrite.h>
-#include <dcomp.h>
-#include <dxgi.h>
 #include <wrl/client.h>
+#include <string>
 
 export module window.Renderer;
 
 import window.Lyrics;
+import plugin.Config;
+import util.Log;
 
+// 渲染器：GDI 窗口路径（D2D HwndRenderTarget）+ 颜色键透明（LWA_COLORKEY）。
+//
+// 关键结论（菜单模态冻结排查，2026-08-04）：
+// ① 任务栏右键菜单模态会抑制 WM_PAINT 派发（RedrawWindow/InvalidateRect
+//    失效，实测菜单期间 onPaint 停止、关闭后恢复）——歌词更新路径
+//    （WM_APP+1）直接调用 onPaint() 绕过该机制（最终修复）。
+// ② DComp 合成链与 UpdateLayeredWindow 在菜单模态/任务栏区域均不可靠
+//    （DComp 冻结；ULW 提交成功但不上屏），HwndRenderTarget 直接画窗口
+//    客户区最可靠（窗口为独立顶层窗口，非任务栏子窗口）。
+// ③ HwndRenderTarget 不支持 alpha：先试洋红键色（ClearType 彩边残留粉色
+//    光晕），最终用黑色键色 + 灰度抗锯齿（文字边缘灰阶，深色任务栏上
+//    近乎不可见）。
 export class Renderer {
 private:
-    Microsoft::WRL::ComPtr<ID3D11Device> d3dDevice{};
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory{};
-    Microsoft::WRL::ComPtr<ID2D1RenderTarget> d2dRenderTarget{};
+    Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> d2dRenderTarget{};
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory{};
-    Microsoft::WRL::ComPtr<IDXGIFactory2> dxgiFactory{};
-    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice{};
-    Microsoft::WRL::ComPtr<IDXGISwapChain1> dxgiSwapChain{};
-    Microsoft::WRL::ComPtr<IDXGISurface1> dxgiSurface{};
-    Microsoft::WRL::ComPtr<IDCompositionDevice> dcompDevice{};
-    Microsoft::WRL::ComPtr<IDCompositionTarget> dcompTarget{};
-    Microsoft::WRL::ComPtr<IDCompositionVisual> dcompVisual{};
-
-    auto initializeDirectX() -> void {
-        D3D11CreateDevice(
-            nullptr,
-            D3D_DRIVER_TYPE_HARDWARE,
-            nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            nullptr,
-            0,
-            D3D11_SDK_VERSION,
-            &this->d3dDevice,
-            nullptr,
-            nullptr
-        );
-        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_PPV_ARGS(&this->d2dFactory));
-        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(this->dwriteFactory), &this->dwriteFactory);
-    }
-
-    auto initializeSwapChain() -> void {
-        constexpr auto desc = DXGI_SWAP_CHAIN_DESC1{
-            .Width = 1,
-            .Height = 1,
-            .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
-            .SampleDesc{.Count = 1},
-            .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            .BufferCount = 2,
-            .SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-            .AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED,
-        };
-        CreateDXGIFactory(IID_PPV_ARGS(&this->dxgiFactory));
-        this->d3dDevice.As(&this->dxgiDevice);
-        this->dxgiFactory->CreateSwapChainForComposition(this->dxgiDevice.Get(), &desc, nullptr, &this->dxgiSwapChain);
-    }
-
-    auto initializeComposition(const HWND hwnd) -> void {
-        DCompositionCreateDevice(this->dxgiDevice.Get(), IID_PPV_ARGS(&this->dcompDevice));
-        this->dcompDevice->CreateTargetForHwnd(hwnd, false, &this->dcompTarget);
-        this->dcompDevice->CreateVisual(&this->dcompVisual);
-        this->dcompVisual->SetContent(this->dxgiSwapChain.Get());
-        this->dcompTarget->SetRoot(this->dcompVisual.Get());
-    }
 
 public:
     auto onCreate(const HWND hwnd) -> void {
-        this->initializeDirectX();
-        this->initializeSwapChain();
-        this->initializeComposition(hwnd);
+        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_PPV_ARGS(&this->d2dFactory));
+        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(this->dwriteFactory), &this->dwriteFactory);
+        auto props = D2D1::RenderTargetProperties();
+        const auto hwndProps = D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(1, 1));
+        this->d2dFactory->CreateHwndRenderTarget(props, hwndProps, &this->d2dRenderTarget);
+        // 灰度抗锯齿：键色透明下文字边缘为灰阶而非彩边（ClearType 在键色背景上会产生色边）
+        this->d2dRenderTarget->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        // 颜色键透明：背景画黑色（键色），LWA_COLORKEY 使其透明；
+        // 灰度抗锯齿下文字边缘为灰色（深色任务栏上近乎不可见）
+        SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
     }
 
     auto onSize(const UINT width, const UINT height, const UINT dpi) -> void {
-        this->dxgiSurface.Reset();
-        this->d2dRenderTarget.Reset();
-        this->dxgiSwapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
-        this->dxgiSwapChain->GetBuffer(0, IID_PPV_ARGS(&this->dxgiSurface));
-        this->d2dFactory->CreateDxgiSurfaceRenderTarget(
-            this->dxgiSurface.Get(),
-            D2D1::RenderTargetProperties(
-                D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
-                dpi,
-                dpi
-            ),
-            &this->d2dRenderTarget
-        );
+        if (this->d2dRenderTarget) {
+            this->d2dRenderTarget->Resize(D2D1::SizeU(width, height));
+        }
     }
 
+    // 直接绘制（不经 WM_PAINT；WM_APP+1 歌词更新与 WM_PAINT 均调用本方法，
+    // 菜单模态下 WM_PAINT 被抑制时仍能更新）
     auto onPaint() -> void {
+        if (!this->d2dRenderTarget) {
+            return;
+        }
         Lyrics lyrics{
             this->d2dRenderTarget.Get(),
             this->dwriteFactory.Get()
         };
         this->d2dRenderTarget->BeginDraw();
-        this->d2dRenderTarget->Clear();
+        // 键色背景（黑色 → LWA_COLORKEY 透明）
+        this->d2dRenderTarget->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f));
         lyrics.onDraw();
         this->d2dRenderTarget->EndDraw();
-        this->dxgiSwapChain->Present(1, 0);
-        this->dcompDevice->Commit();
     }
 };
