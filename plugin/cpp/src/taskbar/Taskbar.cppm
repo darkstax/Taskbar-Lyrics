@@ -15,18 +15,28 @@ export class Taskbar {
 public:
     typedef std::function<void()> Callback;
 
+    // 任务栏布局快照（由布局线程独立测量，主线程只读应用）
+    struct TaskbarLayout {
+        RECT frame{};
+        RECT tray{};
+        RECT widgets{};
+        RECT taskList{};
+        bool centered = false;
+        bool widgetsEnabled = false;
+    };
+
 private:
     Microsoft::WRL::ComPtr<Handler> handler{};
     Microsoft::WRL::ComPtr<IUIAutomation> automation{};
     Microsoft::WRL::ComPtr<IUIAutomationElement> root{};
 
-    auto createConditionByProperty(PROPERTYID propertyId, const wchar_t *value) const -> Microsoft::WRL::ComPtr<IUIAutomationCondition> {
+    static auto createConditionByProperty(IUIAutomation *automation, PROPERTYID propertyId, const wchar_t *value) -> Microsoft::WRL::ComPtr<IUIAutomationCondition> {
         VARIANT var{};
         VariantInit(&var);
         var.vt = VT_BSTR;
         var.bstrVal = SysAllocString(value);
         Microsoft::WRL::ComPtr<IUIAutomationCondition> condition{};
-        this->automation->CreatePropertyCondition(propertyId, var, &condition);
+        automation->CreatePropertyCondition(propertyId, var, &condition);
         SysFreeString(var.bstrVal);
         VariantClear(&var);
         return condition;
@@ -45,7 +55,7 @@ public:
         CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation, &this->automation);
         Microsoft::WRL::ComPtr<IUIAutomationElement> element{};
         this->automation->ElementFromHandle(Taskbar::getHWND(), &element);
-        const auto condition = this->createConditionByProperty(UIA_ClassNamePropertyId, L"Windows.UI.Input.InputSite.WindowClass");
+        const auto condition = this->createConditionByProperty(this->automation.Get(), UIA_ClassNamePropertyId, L"Windows.UI.Input.InputSite.WindowClass");
         element->FindFirst(TreeScope_Children, condition.Get(), &this->root);
     }
 
@@ -57,28 +67,55 @@ public:
         }).detach();
     }
 
-    auto getRectForTaskbarFrame() const -> RECT {
-        RECT rect{};
-        const auto condition = this->createConditionByProperty(UIA_ClassNamePropertyId, L"Taskbar.TaskbarFrameAutomationPeer");
+    // 独立测量任务栏布局（布局线程专用）：每次新建 UIAutomation 实例，
+    // 无跨线程共享对象；阻塞/失败均不影响主线程。调用线程需已 CoInitialize。
+    static auto measureLayout() -> TaskbarLayout {
+        TaskbarLayout out{};
+        out.centered = Registry::isTaskbarCentered();
+        out.widgetsEnabled = Registry::isWidgetsEnabled();
+        Microsoft::WRL::ComPtr<IUIAutomation> automation{};
+        if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation, &automation))) {
+            return out;
+        }
         Microsoft::WRL::ComPtr<IUIAutomationElement> element{};
-        this->root->FindFirst(TreeScope_Children, condition.Get(), &element);
+        if (FAILED(automation->ElementFromHandle(Taskbar::getHWND(), &element))) {
+            return out;
+        }
+        Microsoft::WRL::ComPtr<IUIAutomationElement> root{};
+        const auto condition = createConditionByProperty(automation.Get(), UIA_ClassNamePropertyId, L"Windows.UI.Input.InputSite.WindowClass");
+        element->FindFirst(TreeScope_Children, condition.Get(), &root);
+        if (!root) {
+            return out;
+        }
+        out.frame = getRectForTaskbarFrame(automation.Get(), root.Get());
+        out.tray = getRectForTrayFrame(automation.Get(), root.Get());
+        out.widgets = getRectForWidgetsButton(automation.Get(), root.Get(), out.widgetsEnabled);
+        out.taskList = getRectForTaskList(automation.Get(), root.Get());
+        return out;
+    }
+
+    static auto getRectForTaskbarFrame(IUIAutomation *automation, IUIAutomationElement *root) -> RECT {
+        RECT rect{};
+        const auto condition = createConditionByProperty(automation, UIA_ClassNamePropertyId, L"Taskbar.TaskbarFrameAutomationPeer");
+        Microsoft::WRL::ComPtr<IUIAutomationElement> element{};
+        root->FindFirst(TreeScope_Children, condition.Get(), &element);
         element->get_CurrentBoundingRectangle(&rect);
         return rect;
     }
 
-    auto getRectForTaskList() const -> RECT {
+    static auto getRectForTaskList(IUIAutomation *automation, IUIAutomationElement *root) -> RECT {
         RECT rect{
             .left = LONG_MAX,
             .top = LONG_MAX,
             .right = LONG_MIN,
             .bottom = LONG_MIN
         };
-        const auto conditionID = this->createConditionByProperty(UIA_AutomationIdPropertyId, L"StartButton");
-        const auto conditionCN = this->createConditionByProperty(UIA_ClassNamePropertyId, L"Taskbar.TaskListButtonAutomationPeer");
+        const auto conditionID = createConditionByProperty(automation, UIA_AutomationIdPropertyId, L"StartButton");
+        const auto conditionCN = createConditionByProperty(automation, UIA_ClassNamePropertyId, L"Taskbar.TaskListButtonAutomationPeer");
         Microsoft::WRL::ComPtr<IUIAutomationCondition> condition{};
-        this->automation->CreateOrCondition(conditionID.Get(), conditionCN.Get(), &condition);
+        automation->CreateOrCondition(conditionID.Get(), conditionCN.Get(), &condition);
         Microsoft::WRL::ComPtr<IUIAutomationElementArray> elements{};
-        this->root->FindAll(TreeScope_Descendants, condition.Get(), &elements);
+        root->FindAll(TreeScope_Descendants, condition.Get(), &elements);
         int length = 0;
         elements->get_Length(&length);
         for (int i = 0; i < length; i++) {
@@ -96,16 +133,16 @@ public:
         return rect;
     }
 
-    auto getRectForTrayFrame() const -> RECT {
+    static auto getRectForTrayFrame(IUIAutomation *automation, IUIAutomationElement *root) -> RECT {
         RECT rect{
             .left = LONG_MAX,
             .top = LONG_MAX,
             .right = LONG_MIN,
             .bottom = LONG_MIN
         };
-        const auto condition = this->createConditionByProperty(UIA_AutomationIdPropertyId, L"SystemTrayIcon");
+        const auto condition = createConditionByProperty(automation, UIA_AutomationIdPropertyId, L"SystemTrayIcon");
         Microsoft::WRL::ComPtr<IUIAutomationElementArray> elements{};
-        this->root->FindAll(TreeScope_Children, condition.Get(), &elements);
+        root->FindAll(TreeScope_Children, condition.Get(), &elements);
         int length = 0;
         elements->get_Length(&length);
         for (int i = 0; i < length; i++) {
@@ -123,12 +160,12 @@ public:
         return rect;
     }
 
-    auto getRectForWidgetsButton() const -> RECT {
+    static auto getRectForWidgetsButton(IUIAutomation *automation, IUIAutomationElement *root, const bool widgetsEnabled) -> RECT {
         RECT rect{};
-        if (Registry::isWidgetsEnabled()) {
-            const auto condition = this->createConditionByProperty(UIA_AutomationIdPropertyId, L"WidgetsButton");
+        if (widgetsEnabled) {
+            const auto condition = createConditionByProperty(automation, UIA_AutomationIdPropertyId, L"WidgetsButton");
             Microsoft::WRL::ComPtr<IUIAutomationElement> element{};
-            this->root->FindFirst(TreeScope_Descendants, condition.Get(), &element);
+            root->FindFirst(TreeScope_Descendants, condition.Get(), &element);
             element->get_CurrentBoundingRectangle(&rect);
         }
         return rect;

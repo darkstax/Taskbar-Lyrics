@@ -2,6 +2,9 @@ module;
 
 #include <Windows.h>
 #include <functional>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 
 export module window.Window;
 
@@ -14,6 +17,13 @@ import window.Renderer;
 // 主线程收到后在 WM_APP+1 分支拉取歌词缓存、写 config 并重绘，
 // 保证 config 写与 UI 读全部收敛在主线程。
 //
+// 布局机制（防 explorer 卡死）：
+//   WM_APP+2 已废弃——结构变化/注册表回调只置布局脏标志并唤醒布局线程
+//   （原子 + 条件变量，绝不碰 UIA/explorer），由独立布局线程执行全部
+//   UIAutomation 跨进程查询（explorer 忙碌时可阻塞，无碍主线程），
+//   测量结果经 WM_APP+3 回主线程做纯算术 + MoveWindow。主线程消息循环
+//   永不阻塞 → 命中测试/输入始终响应 → 反复右键不会挂起桌面输入链。
+//
 // explorer 重启取舍（v1）：本窗口是 Shell_TrayWnd 的子窗口，explorer 重启
 // 会销毁本窗口，WM_DESTROY → PostQuitMessage 干净退出；v1 不实现
 // TaskbarCreated 消息监听与窗口重建，explorer 重启后由用户重新启动本工具。
@@ -21,6 +31,14 @@ export class Window {
 private:
     HWND hwnd = nullptr;
     std::function<void()> lyricSource{};
+
+    // 布局线程（独立测量 UIA，主线程永不阻塞）
+    std::thread layoutThread{};
+    std::mutex layoutMutex{};
+    std::condition_variable layoutCv{};
+    bool layoutDirty = false;
+    bool layoutStop = false;
+    Taskbar::TaskbarLayout lastLayout{};
 
     static auto CALLBACK WindowProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) -> LRESULT {
         if (message == WM_CREATE) [[unlikely]] {
@@ -39,11 +57,10 @@ private:
             case WM_CREATE: {
                 this->hwnd = hwnd;
                 this->taskbar.initialize();
-                // 结构变化/注册表回调一律 PostMessage 收敛到主线程（WM_APP+2）再执行
-                // update()：UIAutomation 事件线程与注册表监听线程不得直接跨进程查询
-                // explorer（右键菜单模态期间会阻塞 RPC，反复触发可致 explorer 卡死）。
+                // 结构变化/注册表回调只置脏并唤醒布局线程（原子+条件变量，
+                // 事件线程/UIA 线程/注册表线程均不碰 explorer，主线程零阻塞）。
                 this->taskbar.setListener([this] {
-                    PostMessageW(this->hwnd, WM_APP + 2, 0, 0);
+                    this->update();
                 });
                 this->renderer.onCreate(hwnd);
                 break;
@@ -67,9 +84,10 @@ private:
                 }
                 break;
             }
-            case WM_APP + 2: {
-                // 任务栏结构变化/注册表变更通知（已收敛到主线程）→ 重新定位
-                this->update();
+            case WM_APP + 3: {
+                // 布局测量完成（布局线程 PostMessage）：主线程应用快照（纯算术）
+                std::lock_guard<std::mutex> lock(this->layoutMutex);
+                this->applyLayout(this->lastLayout);
                 break;
             }
             case WM_NCHITTEST: {
@@ -131,10 +149,26 @@ public:
         if (this->hwnd == nullptr) {
             return false;
         }
+        // 启动布局线程（独立测量 UIA；首次置脏触发立即测量）
+        this->layoutThread = std::thread([this] {
+            this->layoutThreadLoop();
+        });
         // 初始定位：任务栏结构变化事件可能较晚/不触发（冒烟实测窗口停留 0x0），
         // 主动 update 一次保证窗口立即可见（WM_CREATE 已同步完成 Taskbar 初始化）
         this->update();
         return true;
+    }
+
+    // 停止布局线程（析构时调用；等待至多一次测量完成）
+    ~Window() {
+        {
+            std::lock_guard<std::mutex> lock(this->layoutMutex);
+            this->layoutStop = true;
+        }
+        this->layoutCv.notify_all();
+        if (this->layoutThread.joinable()) {
+            this->layoutThread.join();
+        }
     }
 
     auto runner() -> void {
@@ -149,11 +183,48 @@ public:
         if (this->hwnd == nullptr) [[unlikely]] {
             return;
         }
+        // 仅置脏并唤醒布局线程（主线程零阻塞）；实际测量在线程内完成
+        {
+            std::lock_guard<std::mutex> lock(this->layoutMutex);
+            this->layoutDirty = true;
+        }
+        this->layoutCv.notify_one();
+    }
 
-        const auto taskbarFrame = this->taskbar.getRectForTaskbarFrame();
-        const auto trayFrameRect = this->taskbar.getRectForTrayFrame();
-        const auto widgetsButtonRect = this->taskbar.getRectForWidgetsButton();
-        const auto taskListRect = this->taskbar.getRectForTaskList();
+    // 布局线程：等待脏标志/定时心跳 → 独立测量 UIA → 缓存 → 通知主线程应用。
+    // explorer 忙碌（如右键菜单模态）时测量可阻塞数秒，但只影响本线程。
+    auto layoutThreadLoop() -> void {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+        while (true) {
+            {
+                std::unique_lock<std::mutex> lock(this->layoutMutex);
+                this->layoutCv.wait_for(lock, std::chrono::seconds(2), [this] {
+                    return this->layoutDirty || this->layoutStop;
+                });
+                if (this->layoutStop) {
+                    break;
+                }
+                this->layoutDirty = false;
+            }
+            const auto layout = Taskbar::measureLayout();
+            {
+                std::lock_guard<std::mutex> lock(this->layoutMutex);
+                this->lastLayout = layout;
+            }
+            PostMessageW(this->hwnd, WM_APP + 3, 0, 0);
+        }
+        CoUninitialize();
+    }
+
+    // 主线程应用布局快照：纯算术 + MoveWindow/RedrawWindow（微秒级，不阻塞）
+    auto applyLayout(const Taskbar::TaskbarLayout &layout) -> void {
+        if (this->hwnd == nullptr) [[unlikely]] {
+            return;
+        }
+        const auto &taskbarFrame = layout.frame;
+        const auto &trayFrameRect = layout.tray;
+        const auto &widgetsButtonRect = layout.widgets;
+        const auto &taskListRect = layout.taskList;
 
         auto offset = 0L;
         auto width = 0L;
@@ -162,9 +233,9 @@ public:
         switch (config.window_alignment) {
             case TASKBAR_WINDOW_ALIGNMENT::TASKBAR_WINDOW_ALIGNMENT_AUTO: [[fallthrough]];
             case TASKBAR_WINDOW_ALIGNMENT::TASKBAR_WINDOW_ALIGNMENT_LEFT: {
-                if (Registry::isTaskbarCentered()) {
+                if (layout.centered) {
                     width += taskListRect.left;
-                    if (Registry::isWidgetsEnabled()) {
+                    if (layout.widgetsEnabled) {
                         offset += widgetsButtonRect.right;
                     }
                     break;
@@ -173,9 +244,9 @@ public:
             }
             case TASKBAR_WINDOW_ALIGNMENT::TASKBAR_WINDOW_ALIGNMENT_RIGHT: {
                 offset += taskListRect.right;
-                if (Registry::isTaskbarCentered()) {
+                if (layout.centered) {
                     width += trayFrameRect.left;
-                } else if (Registry::isWidgetsEnabled()) {
+                } else if (layout.widgetsEnabled) {
                     width += widgetsButtonRect.left;
                 } else {
                     width += trayFrameRect.left;
