@@ -36,6 +36,7 @@ target_link_libraries(taskbar-lyrics PRIVATE
     dwrite
     dxgi
     dcomp
+    shell32 # SHQueryUserNotificationState
 )
 
 if(MSVC)

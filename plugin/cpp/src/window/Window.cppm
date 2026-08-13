@@ -5,10 +5,12 @@ module;
 #include <windowsx.h>
 #include <shellapi.h>
 #include <ShlObj.h>
+#include <shobjidl.h> // SHQueryUserNotificationState / QUERY_USER_NOTIFICATION_STATE
 #include <functional>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
+#include <atomic>
 #include <string>
 
 export module window.Window;
@@ -51,6 +53,11 @@ private:
     bool verticalMode = false;
     bool dragging = false;
     POINT dragOffset{};
+
+    // 全屏隐藏状态：fullscreen_ 由布局线程心跳写入（原子，主线程只读），
+    // hidden_ 仅主线程在 applyLayout 中修改（记录当前是否因全屏而隐藏）
+    std::atomic<bool> fullscreen_{false};
+    bool hidden_ = false;
 
     // 锁定状态：锁定=透明底+点击穿透（默认）；解锁=半透明底+可拖动
     bool locked = true;
@@ -384,6 +391,50 @@ public:
         this->layoutCv.notify_one();
     }
 
+    // 全屏检测（布局线程心跳调用，微秒级）：任务栏被无边框全屏窗口覆盖时返回 true。
+    // 首选系统状态查询 SHQueryUserNotificationState（D3D 独占/无边框全屏时系统通常
+    // 报告 QUNS_RUNNING_D3D_FULL_SCREEN；headless 环境为 QUNS_NOT_PRESENT，视为非全屏）；
+    // 未命中时几何法兜底：前台窗口矩形与显示器区域 rcMonitor 比较（±2px 容差）。
+    // 关键：比较的是 rcMonitor（全屏区域）而非 rcWork（工作区），最大化窗口
+    // （不盖任务栏）不会误判。
+    auto detectFullscreen() -> bool {
+        QUERY_USER_NOTIFICATION_STATE quns = QUNS_NOT_PRESENT;
+        if (SUCCEEDED(SHQueryUserNotificationState(&quns)) && quns == QUNS_RUNNING_D3D_FULL_SCREEN) {
+            return true;
+        }
+        // 几何法兜底
+        const auto fg = GetForegroundWindow();
+        if (fg == nullptr || fg == this->hwnd) {
+            return false;
+        }
+        if (IsIconic(fg)) {
+            return false;
+        }
+        // 排除桌面/任务栏自身（Shell_TrayWnd/Progman/WorkerW 覆盖全屏属正常）
+        wchar_t className[64]{};
+        if (GetClassNameW(fg, className, 64) == 0 ||
+            wcscmp(className, L"Shell_TrayWnd") == 0 ||
+            wcscmp(className, L"Progman") == 0 ||
+            wcscmp(className, L"WorkerW") == 0) {
+            return false;
+        }
+        MONITORINFO mi{.cbSize = sizeof(mi)};
+        const auto monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        if (monitor == nullptr || !GetMonitorInfoW(monitor, &mi)) {
+            return false;
+        }
+        RECT fr{};
+        if (!GetWindowRect(fg, &fr)) {
+            return false;
+        }
+        // 与 rcMonitor（全屏区域）比较，容差 ±2px
+        constexpr LONG tolerance = 2;
+        return fr.left <= mi.rcMonitor.left + tolerance &&
+               fr.top <= mi.rcMonitor.top + tolerance &&
+               fr.right >= mi.rcMonitor.right - tolerance &&
+               fr.bottom >= mi.rcMonitor.bottom - tolerance;
+    }
+
     // 布局线程：等待脏标志/定时心跳 → 独立测量 UIA → 缓存 → 通知主线程应用。
     // explorer 忙碌（如右键菜单模态）时测量可阻塞数秒，但只影响本线程。
     auto layoutThreadLoop() -> void {
@@ -399,6 +450,10 @@ public:
                 }
                 this->layoutDirty = false;
             }
+            // 全屏检测：前台无边框全屏（任务栏被覆盖）时置位，主线程 applyLayout
+            // 据此刻隐藏/恢复歌词条。仅查询系统状态 + 前台窗口矩形，微秒级，
+            // 布局线程侧调用不阻塞主线程。
+            this->fullscreen_.store(this->detectFullscreen());
             const auto layout = Taskbar::measureLayout();
             {
                 std::lock_guard<std::mutex> lock(this->layoutMutex);
@@ -413,6 +468,20 @@ public:
     auto applyLayout(const Taskbar::TaskbarLayout &layout) -> void {
         if (this->hwnd == nullptr) [[unlikely]] {
             return;
+        }
+        // 全屏隐藏/恢复：全屏且未隐藏 → SW_HIDE 并提前退出（跳过定位/重绘）；
+        // 退出全屏且已隐藏 → SW_SHOWNOACTIVATE 后继续正常流程（MoveWindow 归位
+        // + 末尾 onPaint 重绘）。可见性只在主线程修改（布局线程仅写 atomic 标志）。
+        if (this->fullscreen_.load()) {
+            if (!this->hidden_) {
+                ShowWindow(this->hwnd, SW_HIDE);
+                this->hidden_ = true;
+            }
+            return;
+        }
+        if (this->hidden_) {
+            ShowWindow(this->hwnd, SW_SHOWNOACTIVATE);
+            this->hidden_ = false;
         }
         const auto &taskbarFrame = layout.frame;
 
