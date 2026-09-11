@@ -206,18 +206,22 @@ auto ParseIntValue(const std::string &str, T &out) -> bool {
 }
 
 // 非法颜色输入日志去重（仅主线程读写：config 写入全部收敛主线程）：
-// WM_APP+1 每行歌词全量重放 pullConfig，非法值会被反复喂进来，同一原文
-// 只记一次避免刷屏；收到合法配置时清空，使“再次变非法”仍能记一条。
-inline auto shouldLogBadColor(const std::string &tagged) -> bool {
-    static std::string last{};
-    if (last == tagged) {
+// WM_APP+1 每行歌词全量重放 pullConfig，非法值会被反复喂进来，同一 key
+// 的同一原文只记一次避免刷屏；审查修复 N1：旧实现是全局单槽且任意合法
+// 颜色应用后整槽清空，而 go 侧每次重放恒带两个颜色 key，primary 非法+
+// secondary 合法时槽被配对 key 清掉，退化成每行歌词刷一条——改为 per-key
+// 槽，仅同 key 收到合法值（或清除串）时清该 key 的槽，“再次变非法”仍能记一条。
+inline auto shouldLogBadColor(const std::string &key, const std::string &value) -> bool {
+    static std::unordered_map<std::string, std::string> lastBad{};
+    auto it = lastBad.find(key);
+    if (it != lastBad.end() && it->second == value) {
         return false;
     }
-    last = tagged;
+    lastBad[key] = value;
     return true;
 }
-inline auto resetBadColorLog() -> void {
-    shouldLogBadColor(std::string{}); // 借去重槽写入空串，重置上次记录
+inline auto resetBadColorLog(const std::string &key) -> void {
+    shouldLogBadColor(key, std::string{}); // 借去重槽写入空串，重置该 key 的记录
 }
 
 // 颜色配置已被托盘接管日志去重代数（随接管/解除递增，不持久化：重启后
@@ -251,12 +255,12 @@ inline auto applyColorConfig(const std::string &key, const std::string &value) -
         explicitFlag = config.colorSecondaryExplicit;
     }
     if (!ParseColorValue(value, c, explicitFlag)) {
-        if (shouldLogBadColor(key + '=' + value)) {
+        if (shouldLogBadColor(key, value)) {
             Log::event(L"非法颜色配置值，已忽略并保持当前值: " + stringToWString(key) + L"=" + stringToWString(value));
         }
         return;
     }
-    resetBadColorLog();
+    resetBadColorLog(key);
     const auto oldRaw = *colorSlot;
     const auto oldExplicit = *explicitSlot;
     const auto oldActive = (colorSlot == &config.color_primary)
