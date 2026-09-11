@@ -169,8 +169,13 @@ public:
 
         // 允许负 margin：贴合放大后文字块略高于窗口，对称居中溢出、由边缘裁切
         //（旧 clamp≥0 会把第二行整体推出窗口底，只裁底部不裁顶部，视觉重心偏上）。
+        // 边缘留白微调（用户要求）：文字整体右移 4px、下移 1px（物理像素，
+        // 按 dpi 折算 DIP）——负 margin 下首字会直接撞窗口左缘、顶部笔画贴边，
+        // 留出呼吸感观感更好。右缘同步平移，保持行宽不被提前裁切。
+        const auto padX = 4.f * 96.f / dpiX;
+        const auto padY = 1.f * 96.f / dpiY;
         auto margin = (height - this->metrics1.height - this->metrics2.height) / 2;
-        const auto rect1 = D2D1::RectF(margin, margin, width - margin, margin + this->metrics1.height);
+        const auto rect1 = D2D1::RectF(margin + padX, margin + padY, width - margin + padX, margin + this->metrics1.height + padY);
         D2D1_RECT_F rect2{};
         if (hasSecondary) {
             rect2 = D2D1::RectF(rect1.left, rect1.bottom, rect1.right, rect1.bottom + this->metrics2.height);
