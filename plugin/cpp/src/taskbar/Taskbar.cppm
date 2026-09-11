@@ -2,6 +2,7 @@ module;
 
 #include <Windows.h>
 #include <UIAutomation.h>
+#include <shellapi.h> // SHAppBarMessage / APPBARDATA
 #include <wrl/client.h>
 #include <thread>
 #include <functional>
@@ -18,6 +19,11 @@ public:
     // 任务栏布局快照（由布局线程独立测量，主线程只读应用）
     struct TaskbarLayout {
         RECT frame{};
+        // Shell_TrayWnd 完整窗口矩形（物理像素）：Win11 任务栏含上下留白，
+        // UIA TaskbarFrame 只量内容区（60px 栏只报 40px），字号"栏高/2"贴合
+        // 必须用完整栏高，否则字偏小（用户实测反馈）。measureLayout 用
+        // GetWindowRect 补充；取不到时 applyLayout 回退 frame。
+        RECT trayWnd{};
         RECT tray{};
         RECT widgets{};
         RECT taskList{};
@@ -93,6 +99,15 @@ public:
             return out;
         }
         out.frame = getRectForTaskbarFrame(automation.Get(), root.Get());
+        // 完整任务栏占用矩形：SHAppBarMessage(ABM_GETTASKBARPOS) 返回任务栏在
+        // 屏幕上占用的完整区域（含 Win11 上下留白，进程 PerMonitorV2 感知 →
+        // 物理像素）。实测 Shell_TrayWnd 的 GetWindowRect 不含留白（60px 栏只
+        // 报 40px），不可用；Appbar 失败时保持零矩形，applyLayout 回退 frame。
+        APPBARDATA abd{};
+        abd.cbSize = sizeof(APPBARDATA);
+        if (SHAppBarMessage(ABM_GETTASKBARPOS, &abd) != 0) {
+            out.trayWnd = abd.rc;
+        }
         out.tray = getRectForTrayFrame(automation.Get(), root.Get());
         out.widgets = getRectForWidgetsButton(automation.Get(), root.Get(), out.widgetsEnabled);
         out.taskList = getRectForTaskList(automation.Get(), root.Get());

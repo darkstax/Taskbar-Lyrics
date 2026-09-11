@@ -782,9 +782,16 @@ public:
 
         offset += config.margin_left;
         width -= config.margin_right + offset;
-        height += taskbarFrame.bottom - taskbarFrame.top;
+        // 栏高/栏顶用 Shell_TrayWnd 完整矩形（含 Win11 上下留白，60 物理 px），
+        // UIA frame 只覆盖内容区（40px）会让字号"栏高/2"贴合偏小（用户实测）；
+        // trayWnd 无效（取不到窗口/零高）时回退 frame，行为与旧版一致。
+        const bool hasTrayWnd = layout.trayWnd.bottom > layout.trayWnd.top;
+        const auto trayTop = hasTrayWnd ? layout.trayWnd.top : taskbarFrame.top;
+        const auto trayHeight = hasTrayWnd ? (layout.trayWnd.bottom - layout.trayWnd.top)
+                                           : (taskbarFrame.bottom - taskbarFrame.top);
+        height += trayHeight;
         // 顶层窗口使用绝对屏幕坐标（任务栏顶部）；子窗口时代 y=0 相对任务栏
-        const auto posY = taskbarFrame.top;
+        const auto posY = trayTop;
 
         BringWindowToTop(this->hwnd);
         MoveWindow(this->hwnd, offset, posY, width, height, false);
