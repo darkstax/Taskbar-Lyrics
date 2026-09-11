@@ -74,8 +74,8 @@ cmake --build --preset x64-release
 
 - **窗口样式**:独立顶层窗口(非任务栏子窗口,避免右键菜单模态冻结合成),组合 `WS_EX_NOPARENTNOTIFY|WS_EX_NOACTIVATE|WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_LAYERED`。
 - **点击穿透**:用 `WM_NCHITTEST → HTTRANSPARENT`;**禁止用 `WS_EX_TRANSPARENT`**(实测导致命中穿透、可拖动失效);水平模式永远穿透。
-- **透明渲染**:D2D `HwndRenderTarget` 直画客户区 + `LWA_COLORKEY` 颜色键透明(黑色键色 + 灰度抗锯齿);不用 DComp/UpdateLayeredWindow(菜单模态下不可靠)。
-- **颜色键透明**:锁定态 LWA_COLORKEY 键色为精确 RGB(0,0,0)——**字色禁止纯黑**(会被挖空致文字消失,用户显式指定纯黑时偏移到 0xFF010101);解锁态(LWA_ALPHA)底色随主题(深色黑/浅色白)。
+- **透明渲染**:D2D `HwndRenderTarget` 直画客户区 + `LWA_COLORKEY` 颜色键透明(键色随主题:深色黑/浅色白 + 灰度抗锯齿;浅色任务栏上黑底深字边缘光晕可见,换白键色后消除);不用 DComp/UpdateLayeredWindow(菜单模态下不可靠)。
+- **颜色键透明**:锁定态 LWA_COLORKEY 键色随主题(`themeKeyRgb`:深色=RGB(0,0,0)/浅色=RGB(255,255,255)),底色 Clear 与键色必须一致——**字色禁止精确等于当前键色**(会被挖空致文字消失;`sanitizeKeyColor(argb,light)`:深色键黑时纯黑→0x010101,浅色键白时纯白→0xFEFEFE);解锁态(LWA_ALPHA)底色同样随主题。
 - **主题跟随**:默认字色跟随 Windows 浅色/深色(优先级:显式配置 > 主题默认 > 深色兜底;浅色 primary `0xFF1A1A1A`/secondary `0xB31A1A1A`,深色全白);检测 = 主线程 `WM_SETTINGCHANGE(ImmersiveColorSet)` + 布局心跳快照携带 lightTheme 兜底;判定键 AppsUseLightTheme 优先、SystemUsesLightTheme 回退;开关持久化 `HKCU\Software\Taskbar-Lyrics\ThemeFollow`,托盘菜单可切换。**托盘接管锁**(`colorLockedByTray`,不持久化):每次托盘操作颜色后忽略管道颜色 key 重放,直到托盘“恢复管道颜色设置”或重启;WM_CREATE 同步 color_theme_light 初始化并立即 onPaint 首帧(消除占位色闪烁);分层属性经 `applyLayeredMode(bool)` 成对切换(SetLayeredWindowAttributes + setAlphaMode 同调)。
 - **配置解析健壮性**:颜色解析仅接受十六进制——可选 `0x` 前缀 + 恰好 6 位(RGB 补 FF alpha)或 8 位(ARGB),不接受纯十进制任意长度(与 README/go-musicfox 校验正则对齐);数值解析 from_chars 完整校验(ParseIntValue),非法输入忽略保持当前值并记日志(不崩主线程);config 写入仅主线程。单元测试 `plugin/cpp/tests/test_config.cpp`(CMake `option(TL_BUILD_TESTS OFF)`,ctest 跑 config_logic)。
 - **WM_PAINT 抑制**:任务栏右键菜单模态会抑制 `WM_PAINT`,歌词更新(WM_APP+1)、布局应用(WM_APP+3)与主题切换(applyTheme)直接调 `renderer.onPaint()` 绕过。

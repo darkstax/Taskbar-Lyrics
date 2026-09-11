@@ -89,12 +89,23 @@ export struct Config {
     DWRITE_TEXT_ALIGNMENT align_secondary = DWRITE_TEXT_ALIGNMENT::DWRITE_TEXT_ALIGNMENT_LEADING;
 } config;
 
-// 用户显式色保护：RGB 精确 (0,0,0) 会被 COLORKEY 挖空（文字不可见），
-// 偏移到 0x010101（肉眼不可辨）；alpha 不参与键色比较，保持原样。
+// 当前主题的 COLORKEY 键色 RGB（LWA_COLORKEY 对键色做精确匹配）：
+// 深色主题=黑（现状），浅色主题=白。导出供渲染层与测试共用，保证
+// “挖空色”与“保护判据”单一真相源。
+export inline auto themeKeyRgb(const bool light) -> unsigned int {
+    return light ? 0x00FFFFFFu : 0x00000000u;
+}
+
+// 用户显式色保护：RGB 精确等于当前键色的像素会被 COLORKEY 挖空（文字不可见），
+// 向反方向偏移到 0x010101 / 0xFEFEFE（肉眼不可辨）；alpha 不参与键色比较，保持原样。
+// 浅色主题键色为白，因此纯白（如用户配 FFFFFFFF 白字）也必须保护，否则文字直接消失。
 // 导出以便单元测试覆盖（纯逻辑，无 OS 依赖）。
-export inline auto sanitizeKeyColor(const unsigned int argb) -> unsigned int {
-    if ((argb & 0x00FFFFFFu) == 0u) {
-        return (argb & 0xFF000000u) | 0x00010101u;
+export inline auto sanitizeKeyColor(const unsigned int argb, const bool light) -> unsigned int {
+    const auto rgb = argb & 0x00FFFFFFu;
+    if (rgb == themeKeyRgb(light)) {
+        // 深色（键色黑）→ 提亮一档；浅色（键色白）→ 压暗一档
+        const auto shifted = light ? 0x00FEFEFEu : 0x00010101u;
+        return (argb & 0xFF000000u) | shifted;
     }
     return argb;
 }
@@ -106,12 +117,12 @@ export inline auto sanitizeKeyColor(const unsigned int argb) -> unsigned int {
 // 只在主线程调用（config 写入全部收敛主线程的既有约定）。
 export auto ResolveThemeColors(Config &cfg) -> void {
     if (cfg.colorPrimaryExplicit) {
-        cfg.color_primary_active = sanitizeKeyColor(cfg.color_primary);
+        cfg.color_primary_active = sanitizeKeyColor(cfg.color_primary, cfg.color_theme_light);
     } else if (cfg.color_theme_follow) {
         cfg.color_primary_active = cfg.color_theme_light ? THEME_LIGHT.primary : THEME_DARK.primary;
     }
     if (cfg.colorSecondaryExplicit) {
-        cfg.color_secondary_active = sanitizeKeyColor(cfg.color_secondary);
+        cfg.color_secondary_active = sanitizeKeyColor(cfg.color_secondary, cfg.color_theme_light);
     } else if (cfg.color_theme_follow) {
         cfg.color_secondary_active = cfg.color_theme_light ? THEME_LIGHT.secondary : THEME_DARK.secondary;
     }

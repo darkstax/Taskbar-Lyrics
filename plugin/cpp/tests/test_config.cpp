@@ -91,13 +91,22 @@ auto test_parse_color() -> void {
     CHECK(!ParseColorValue("0XZZZZZZ", c, ex));
 }
 
-// ---- 纯黑 COLORKEY 保护（sanitizeKeyColor）----
+// ---- 键色挖空保护（sanitizeKeyColor，键色随主题：深色=黑/浅色=白）----
 auto test_sanitize() -> void {
-    CHECK_EQ(sanitizeKeyColor(0xFF000000u), 0xFF010101u); // alpha 保留，RGB 偏移
-    CHECK_EQ(sanitizeKeyColor(0x80000000u), 0x80010101u);
-    CHECK_EQ(sanitizeKeyColor(0x00000000u), 0x00010101u);
-    CHECK_EQ(sanitizeKeyColor(0xFF000001u), 0xFF000001u); // 非纯黑不动
-    CHECK_EQ(sanitizeKeyColor(0xFFFFFFFFu), 0xFFFFFFFFu);
+    // 深色主题（键色黑）：纯黑偏移，白字不受影响
+    CHECK_EQ(sanitizeKeyColor(0xFF000000u, false), 0xFF010101u); // alpha 保留，RGB 偏移
+    CHECK_EQ(sanitizeKeyColor(0x80000000u, false), 0x80010101u);
+    CHECK_EQ(sanitizeKeyColor(0x00000000u, false), 0x00010101u);
+    CHECK_EQ(sanitizeKeyColor(0xFF000001u, false), 0xFF000001u); // 非纯黑不动
+    CHECK_EQ(sanitizeKeyColor(0xFFFFFFFFu, false), 0xFFFFFFFFu); // 深色键色=黑，白字安全
+    // 浅色主题（键色白）：纯白偏移至 0xFEFEFE，黑字不受影响
+    CHECK_EQ(sanitizeKeyColor(0xFFFFFFFFu, true), 0xFFFEFEFEu);
+    CHECK_EQ(sanitizeKeyColor(0x80FFFFFFu, true), 0x80FEFEFEu);
+    CHECK_EQ(sanitizeKeyColor(0xFF1A1A1Au, true), 0xFF1A1A1Au); // 浅色默认深字安全
+    CHECK_EQ(sanitizeKeyColor(0xFF000000u, true), 0xFF000000u); // 浅色键色=白，黑字安全
+    // 主题键色单一真相源
+    CHECK_EQ(themeKeyRgb(false), 0x00000000u);
+    CHECK_EQ(themeKeyRgb(true), 0x00FFFFFFu);
 }
 
 // ---- follow + explicit 四态转移（ResolveThemeColors / SetThemeColors）----
@@ -123,7 +132,7 @@ auto test_theme_states() -> void {
     // 态4：explicit 覆盖优先于主题：固化后切深色主题不变
     config.colorPrimaryExplicit = true; // color_primary 保持固化值
     CHECK(SetThemeColors(config, false));
-    CHECK_EQ(config.color_primary_active, sanitizeKeyColor(config.color_primary));
+    CHECK_EQ(config.color_primary_active, sanitizeKeyColor(config.color_primary, config.color_theme_light));
 
     // explicit 纯黑保护：固化纯黑 → 生效色偏移至 0x010101 级
     config.color_primary = 0xFF000000u;

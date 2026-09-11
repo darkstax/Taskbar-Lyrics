@@ -12,7 +12,7 @@
   go-musicfox 侧 `taskbarColorPrimary/Secondary` **留空即跟随主题**（下发空串取消覆盖），
   显式设值则固定颜色；也可用托盘菜单“跟随系统主题”开关。实现：`WM_SETTINGCHANGE
   (ImmersiveColorSet)` 主线程响应 + 2s 布局心跳携带主题位做兜底（锁屏/唤醒错过广播也能收敛）
-- **渲染**：D2D HwndRenderTarget 直接绘制窗口客户区 + LWA_COLORKEY 颜色键透明（黑色键色 + 灰度抗锯齿）；歌词更新路径直接调用 onPaint（任务栏右键菜单模态会抑制 WM_PAINT 派发，直接绘制可绕过——菜单弹出期间歌词持续流动）
+- **渲染**：D2D HwndRenderTarget 直接绘制窗口客户区 + LWA_COLORKEY 颜色键透明（键色随主题：深色黑/浅色白 + 灰度抗锯齿，消除浅色模式下深字边缘光晕"模糊/白边"）；歌词更新路径直接调用 onPaint（任务栏右键菜单模态会抑制 WM_PAINT 派发，直接绘制可绕过——菜单弹出期间歌词持续流动）
 - **窗口**：独立顶层窗口（TOPMOST/TOOLWINDOW/NOACTIVATE/LAYERED + `WM_NCHITTEST→HTTRANSPARENT` 点击穿透），UIAutomation 定位任务栏（布局独立线程测量，主线程永不阻塞）
 - 独立 EXE，无需网易云客户端 / BetterNCM
 

@@ -46,7 +46,17 @@ public:
         const auto primaryColor = hasLyric ? config.color_primary_active : placeholderColor;
         const bool hasSecondary = hasLyric && !config.lyric_secondary.empty();
 
-        const auto [width, height] = this->render->GetSize();
+        const auto [pxW, pxH] = this->render->GetSize();
+        // 单位换算（配合 Renderer 的 SetDpi 修正）：GetSize 返回物理像素，而
+        // DWrite/D2D 绘制坐标是 DIP（= 物理像素 × 96/dpi）。旧代码在默认
+        // 96DPI 下两者数值巧合相等；修正渲染目标 DPI 后必须换算，否则
+        // 布局高度按物理像素算会溢出 DIP 实际可用高（文字被 clip/居中错位）。
+        float dpiX = 96.f, dpiY = 96.f;
+        this->render->GetDpi(&dpiX, &dpiY);
+        if (dpiX <= 0.f) { dpiX = 96.f; }
+        if (dpiY <= 0.f) { dpiY = 96.f; }
+        const auto width = static_cast<float>(pxW) * 96.f / dpiX;
+        const auto height = static_cast<float>(pxH) * 96.f / dpiY;
 
         this->dwrite->CreateTextFormat(
             config.font_family.data(),

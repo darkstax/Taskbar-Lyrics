@@ -98,9 +98,9 @@ private:
                     this->update();
                 });
                 this->renderer.onCreate(hwnd);
-                // 默认分层模式：锁定态 COLORKEY（键色精确 RGB(0,0,0)，背景画黑即透明）；
+                // 主题先行初始化（键色随主题：浅色=白键色，applyLayeredMode 必须
+                // 在 color_theme_light 确定后调用，否则浅色启动时底色≠键色不透明）；
                 // 审查 G3：经 applyLayeredMode 成对切换，不散写（解锁分支下方会再切 ALPHA）。
-                this->applyLayeredMode(false);
                 // 主题跟随初始化：读持久化开关 → 按当前主题解析生效色 →
                 // 记录快照（后续 WM_SETTINGCHANGE 与布局心跳 diff 兜底）
                 config.color_theme_follow = this->loadThemeFollow();
@@ -111,6 +111,9 @@ private:
                 config.color_theme_light = this->lastThemeLight;
                 ResolveThemeColors(config);
                 Log::event(this->lastThemeLight ? L"主题初始化：浅色" : L"主题初始化：深色");
+                // 默认分层模式：锁定态 COLORKEY（键色随主题：深色黑/浅色白，与
+                // Renderer::onPaint 的 Clear 色一致）
+                this->applyLayeredMode(false);
                 // 锁定状态与托盘图标
                 this->locked = this->loadLocked();
                 if (!this->locked) {
@@ -344,7 +347,8 @@ public:
     // - alpha=true：解锁半透明底（LWA_ALPHA 210，底色随主题，无键色）。
     //   注（审查 Y3）：LWA_ALPHA 路径下 crKey 传 0，依赖系统契约——flags 不含
     //   LWA_COLORKEY 时 crKey 参数被忽略。
-    // - alpha=false：锁定 COLORKEY 路径（键色精确 RGB(0,0,0)，底色永远纯黑）。
+    // - alpha=false：锁定 COLORKEY 路径，键色随主题（深色黑/浅色白）——必须与
+    //   Renderer::onPaint 的 Clear 色逐字节一致，否则底色无法变透明（整块实色盖住任务栏）。
     // 仅主线程调用（与窗口消息同线程）。
     auto applyLayeredMode(const bool alpha) -> void {
         if (this->hwnd == nullptr) {
@@ -353,7 +357,12 @@ public:
         if (alpha) {
             SetLayeredWindowAttributes(this->hwnd, 0 /* crKey 被忽略：flags 无 LWA_COLORKEY */, 210, LWA_ALPHA);
         } else {
-            SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+            const auto keyRgb = themeKeyRgb(config.color_theme_light);
+            SetLayeredWindowAttributes(
+                this->hwnd,
+                RGB((keyRgb >> 16) & 0xFF, (keyRgb >> 8) & 0xFF, keyRgb & 0xFF),
+                0,
+                LWA_COLORKEY);
         }
         this->renderer.setAlphaMode(alpha);
     }
@@ -368,6 +377,9 @@ public:
         const bool changed = SetThemeColors(config, light);
         if (themeChanged) {
             this->lastThemeLight = light;
+            // 键色随主题（深色黑/浅色白）：COLORKEY 路径必须同步重设，否则新底色
+            // 不等于旧键色 → 底色不再透明（整块实色盖住任务栏）。
+            this->applyLayeredMode(this->verticalMode && !this->locked);
             Log::event(light ? L"主题切换：浅色（已应用）" : L"主题切换：深色（已应用）");
         }
         // 生效色变化或主题位变化都重绘（占位色只看主题位，与歌词色独立）
@@ -432,7 +444,7 @@ public:
         this->saveLocked(locked);
         if (this->verticalMode) {
             if (locked) {
-                this->applyLayeredMode(false); // 回到 COLORKEY 路径：底色恒为黑
+                this->applyLayeredMode(false); // 回到 COLORKEY 路径：键色/底色随主题
                 this->update(); // 恢复自动定位（贴边/记忆位置）
             } else {
                 this->applyLayeredMode(true); // 解锁底色随主题（深色黑/浅色白）
