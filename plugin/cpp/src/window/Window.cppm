@@ -73,6 +73,7 @@ private:
     static constexpr UINT IDM_UNLOCK = 2;
     static constexpr UINT IDM_EXIT = 3;
     static constexpr UINT IDM_THEME_FOLLOW = 4;
+    static constexpr UINT IDM_TRAY_COLORS = 5; // 解除托盘接管，恢复管道颜色配置生效
 
     static auto CALLBACK WindowProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) -> LRESULT {
         if (message == WM_CREATE) [[unlikely]] {
@@ -97,19 +98,31 @@ private:
                     this->update();
                 });
                 this->renderer.onCreate(hwnd);
+                // 默认分层模式：锁定态 COLORKEY（键色精确 RGB(0,0,0)，背景画黑即透明）；
+                // 审查 G3：经 applyLayeredMode 成对切换，不散写（解锁分支下方会再切 ALPHA）。
+                this->applyLayeredMode(false);
                 // 主题跟随初始化：读持久化开关 → 按当前主题解析生效色 →
                 // 记录快照（后续 WM_SETTINGCHANGE 与布局心跳 diff 兜底）
                 config.color_theme_follow = this->loadThemeFollow();
                 this->lastThemeLight = Registry::isLightTheme();
+                // 审查修复 Y2/G3：先把检测到的主题同步进 config.color_theme_light
+                // （否则占位色/解锁底色在首个心跳前仍按深色默认，浅色系统首帧白字闪一下），
+                // 再解析生效色。
+                config.color_theme_light = this->lastThemeLight;
                 ResolveThemeColors(config);
                 Log::event(this->lastThemeLight ? L"主题初始化：浅色" : L"主题初始化：深色");
                 // 锁定状态与托盘图标
                 this->locked = this->loadLocked();
                 if (!this->locked) {
-                    SetLayeredWindowAttributes(hwnd, 0, 210, LWA_ALPHA);
-                    this->renderer.setAlphaMode(true); // 解锁底色随主题（渲染路径同步）
+                    this->applyLayeredMode(true); // 解锁：LWA_ALPHA 半透明底，底色随主题
                 }
                 this->addTrayIcon();
+                // 审查修复 Y2/G3：主题已在上方同步解析（color_theme_light +
+                // ResolveThemeColors），立即绘制首帧，不依赖后续 WM_PAINT/心跳
+                // 路径（消除“先深色默认再切浅色”的占位色闪烁窗口）。
+                // 注：此刻布局线程尚未启动、快照必为空，几何仍由首个 WM_APP+3
+                // 心跳应用；本帧仅保证“首帧即主题正确色”。
+                this->renderer.onPaint();
                 break;
             }
             case WM_SIZE: {
@@ -152,6 +165,24 @@ private:
                     if (_wcsicmp(area, L"ImmersiveColorSet") == 0) {
                         this->applyTheme();
                     }
+                }
+                break;
+            }
+            case WM_COMMAND: {
+                // 菜单命令自动化入口：托盘菜单项处理同样响应外部 PostMessage
+                // 的 WM_COMMAND（验证脚本 FindWindowW("taskbar_lyrics") 后发
+                // IDM_* 模拟点击，比人工 TrackPopupMenu 可靠；同用户会话内
+                // 本地进程可发消息，权限面与手动点菜单等价，不引入新攻击面）。
+                const auto cmd = LOWORD(wParam);
+                switch (cmd) {
+                    case IDM_LOCK:
+                    case IDM_UNLOCK:
+                    case IDM_THEME_FOLLOW:
+                    case IDM_TRAY_COLORS:
+                    case IDM_EXIT:
+                        this->handleTrayCommand(cmd);
+                        break;
+                    default: break;
                 }
                 break;
             }
@@ -211,21 +242,20 @@ private:
                     AppendMenuW(menu, MF_STRING | (this->locked ? 0 : MF_CHECKED), IDM_UNLOCK, L"解锁歌词（可拖动）");
                     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
                     AppendMenuW(menu, MF_STRING | (config.color_theme_follow ? MF_CHECKED : 0), IDM_THEME_FOLLOW, L"跟随系统主题（浅色/深色）");
+                    // 托盘接管提示（Y1）：接管后管道颜色被忽略、可点击解除；
+                    // 未接管时置灰（此时颜色由管道配置/主题跟随/托盘固化决定，
+                    // 两种来源都可能在下一行歌词重放时生效，文案不声称“管道控制”）
+                    AppendMenuW(menu, MF_STRING, IDM_TRAY_COLORS,
+                                config.colorLockedByTray ? L"恢复管道颜色设置（解除托盘接管）" : L"恢复管道颜色设置（未被接管）");
+                    EnableMenuItem(menu, IDM_TRAY_COLORS, MF_BYCOMMAND | (config.colorLockedByTray ? MF_ENABLED : MF_GRAYED));
+                    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
                     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"退出");
                     POINT pt{};
                     GetCursorPos(&pt);
                     SetForegroundWindow(hwnd);
                     const auto cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, nullptr);
                     DestroyMenu(menu);
-                    if (cmd == IDM_LOCK) {
-                        this->setLocked(true);
-                    } else if (cmd == IDM_UNLOCK) {
-                        this->setLocked(false);
-                    } else if (cmd == IDM_THEME_FOLLOW) {
-                        this->setThemeFollow(!config.color_theme_follow);
-                    } else if (cmd == IDM_EXIT) {
-                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                    }
+                    this->handleTrayCommand(cmd);
                 } else if (lParam == WM_LBUTTONDBLCLK) {
                     // 双击托盘：切换锁定/解锁
                     this->setLocked(!this->locked);
@@ -235,6 +265,21 @@ private:
             default: return DefWindowProc(hwnd, message, wParam, lParam);
         }
         return 0;
+    }
+
+    // 托盘菜单命令分发（TrackPopupMenu 返回值与外部 WM_COMMAND 共用）；仅主线程。
+    auto handleTrayCommand(const UINT cmd) -> void {
+        if (cmd == IDM_LOCK) {
+            this->setLocked(true);
+        } else if (cmd == IDM_UNLOCK) {
+            this->setLocked(false);
+        } else if (cmd == IDM_THEME_FOLLOW) {
+            this->setThemeFollow(!config.color_theme_follow);
+        } else if (cmd == IDM_TRAY_COLORS) {
+            this->restorePipeColors();
+        } else if (cmd == IDM_EXIT) {
+            PostMessageW(this->hwnd, WM_CLOSE, 0, 0);
+        }
     }
 
 public:
@@ -294,9 +339,29 @@ public:
         }
     }
 
+    // 分层模式成对切换（审查修复 G3）：SetLayeredWindowAttributes 与
+    // renderer.setAlphaMode 必须同调同步，散写易漏——统一封装：
+    // - alpha=true：解锁半透明底（LWA_ALPHA 210，底色随主题，无键色）。
+    //   注（审查 Y3）：LWA_ALPHA 路径下 crKey 传 0，依赖系统契约——flags 不含
+    //   LWA_COLORKEY 时 crKey 参数被忽略。
+    // - alpha=false：锁定 COLORKEY 路径（键色精确 RGB(0,0,0)，底色永远纯黑）。
+    // 仅主线程调用（与窗口消息同线程）。
+    auto applyLayeredMode(const bool alpha) -> void {
+        if (this->hwnd == nullptr) {
+            return;
+        }
+        if (alpha) {
+            SetLayeredWindowAttributes(this->hwnd, 0 /* crKey 被忽略：flags 无 LWA_COLORKEY */, 210, LWA_ALPHA);
+        } else {
+            SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+        }
+        this->renderer.setAlphaMode(alpha);
+    }
+
     // 主题检测应用（仅主线程）：读当前浅色/深色 → 与上次比较，变化时重解析
     // 生效色并直接重绘（沿用 WM_APP+1 那套“直接 onPaint 绕过 WM_PAINT 抑制”
-    // 纪律）。幂等：无变化时零开销，可被广播/心跳两处安全重复调用。
+    // 纪律）。幂等：无变化时仅一次注册表读取+比较（微秒级），不重绘；
+    // 可被广播/心跳两处安全重复调用（审查 Y4：修正“零开销”措辞）。
     auto applyTheme() -> void {
         const bool light = Registry::isLightTheme();
         const bool themeChanged = light != this->lastThemeLight;
@@ -313,8 +378,13 @@ public:
 
     // 托盘“跟随系统主题”开关（仅主线程）：
     // - 勾选=允许跟随：同时清除显式颜色覆盖（回到跟随主题）；
-    // - 取消=保持当前色：把当前生效色固化为显式覆盖（否则取消后无值可用），
-    //   后续管道下发新颜色仍可覆盖此固化值。
+    // - 取消=保持当前色：把当前生效色固化为显式覆盖（否则取消后无值可用）。
+    // 审查修复 Y1：两种操作都置“托盘接管锁”（colorLockedByTray）——此后管道
+    // 全量重放的 color_primary/secondary 一律忽略，直到在托盘菜单“恢复管道
+    // 颜色设置”手动解除（旧行为：下一行歌词就把 go 缓存的显式色重放回来，
+    // 用户刚点的“跟随”被静默冲掉，属用户感知级缺陷）。锁不持久化：重启后
+    // 管道配置重新生效（取舍写入 README：接管是会话级决定，避免永久掩盖
+    // go 侧配置变更；持久化反而造成“换了配置没反应”的新困惑）。
     auto setThemeFollow(const bool follow) -> void {
         config.color_theme_follow = follow;
         if (follow) {
@@ -326,11 +396,32 @@ public:
             config.colorPrimaryExplicit = true;
             config.colorSecondaryExplicit = true;
         }
+        config.colorLockedByTray = true;
+        ++config.colorTrayLockGen; // 新一次接管：日志节流重新计一条
         this->saveThemeFollow(follow);
         const auto changed = SetThemeColors(config, Registry::isLightTheme());
-        Log::event(follow ? L"托盘：开启跟随系统主题" : L"托盘：关闭跟随（保持当前色）");
+        Log::event(follow ? L"托盘：开启跟随系统主题（已接管管道颜色）" : L"托盘：关闭跟随，保持当前色（已接管管道颜色）");
         if (changed) {
             this->renderer.onPaint();
+        }
+    }
+
+    // 托盘“恢复管道颜色设置”（仅主线程）：解除接管锁，后续管道 config 颜色
+    // 重新生效。
+    // 解除后立即 PostMessage(WM_APP+1) 触发一次配置重放：go 侧的 config 只存于
+    // C++ 管道缓存（go 仅在配置变化时下发），若不主动重放，恢复后要等到
+    // 下一行歌词才生效（感知延迟）；锁未解除时 WM_APP+1 每行歌词本来就在
+    // 重放，解除后补一次与其自然节奏一致，主线程内重入安全（lyricSource
+    // 只读管道缓存 + 写 config + 幂等 update）。
+    auto restorePipeColors() -> void {
+        if (!config.colorLockedByTray) {
+            return; // 幂等：未接管时无事发生
+        }
+        config.colorLockedByTray = false;
+        ++config.colorTrayLockGen;
+        Log::event(L"托盘：已解除颜色接管，恢复管道颜色配置生效（立即重放当前管道配置）");
+        if (this->hwnd != nullptr) {
+            PostMessageW(this->hwnd, WM_APP + 1, 0, 0); // 异步：菜单处理返回后主线程重放
         }
     }
 
@@ -341,12 +432,10 @@ public:
         this->saveLocked(locked);
         if (this->verticalMode) {
             if (locked) {
-                SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
-                this->renderer.setAlphaMode(false); // 回到 COLORKEY 路径：底色恒为黑
+                this->applyLayeredMode(false); // 回到 COLORKEY 路径：底色恒为黑
                 this->update(); // 恢复自动定位（贴边/记忆位置）
             } else {
-                SetLayeredWindowAttributes(this->hwnd, 0, 210, LWA_ALPHA);
-                this->renderer.setAlphaMode(true); // 解锁底色随主题（深色黑/浅色白）
+                this->applyLayeredMode(true); // 解锁底色随主题（深色黑/浅色白）
             }
             this->renderer.onPaint();
         }
@@ -567,7 +656,8 @@ public:
             return;
         }
         // 主题兜底：布局快照携带主题位（锁屏/唤醒错过 WM_SETTINGCHANGE 广播时，
-        // 2s 心跳内 diff 收敛）；幂等，无变化零开销。隐藏分支前也要应用，
+        // 2s 心跳内 diff 收敛）；applyTheme 幂等，无变化时仅一次注册表读取+
+        // 比较（审查 Y4：非“零开销”，但不重绘不重解色）。隐藏分支前也要应用，
         // 保证恢复可见时颜色已就位。
         this->applyTheme();
         // 全屏隐藏/恢复：全屏且未隐藏 → SW_HIDE 并提前退出（跳过定位/重绘）；
@@ -595,11 +685,9 @@ public:
             this->verticalMode = true;
             // 垂直模式：按锁定状态应用分层属性（锁定=透明，解锁=半透明可拖）
             if (this->locked) {
-                SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
-                this->renderer.setAlphaMode(false); // COLORKEY 路径，底色恒黑
+                this->applyLayeredMode(false); // COLORKEY 路径，底色恒黑
             } else {
-                SetLayeredWindowAttributes(this->hwnd, 0, 210, LWA_ALPHA);
-                this->renderer.setAlphaMode(true); // 解锁底色随主题
+                this->applyLayeredMode(true); // 解锁底色随主题
                 // 解锁：位置自由，布局心跳不干预定位
                 this->renderer.onPaint();
                 return;
@@ -640,8 +728,7 @@ public:
 
         // 水平模式：恢复颜色键透明（点击穿透不挡任务栏）；COLORKEY 路径，
         // 解锁底色标记同步关闭（永远透明+穿透+自动定位，不受锁定状态影响）
-        SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
-        this->renderer.setAlphaMode(false);
+        this->applyLayeredMode(false);
         this->verticalMode = false;
         const auto &trayFrameRect = layout.tray;
         const auto &widgetsButtonRect = layout.widgets;

@@ -48,9 +48,9 @@ public:
         this->d2dFactory->CreateHwndRenderTarget(props, hwndProps, &this->d2dRenderTarget);
         // 灰度抗锯齿：键色透明下文字边缘为灰阶而非彩边（ClearType 在键色背景上会产生色边）
         this->d2dRenderTarget->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        // 颜色键透明：背景画黑色（键色），LWA_COLORKEY 使其透明；
-        // 灰度抗锯齿下文字边缘为灰色（深色任务栏上近乎不可见）
-        SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+        // 分层属性（LWA_COLORKEY）由调用方 Window::applyLayeredMode 成对设置
+        //（审查 G3：SetLayeredWindowAttributes 与 setAlphaMode 必须同调，不散写；
+        // 本方法只建渲染目标，不碰窗口分层样式）。
     }
 
     auto onSize(const UINT width, const UINT height, const UINT dpi) -> void {

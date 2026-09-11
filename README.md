@@ -28,6 +28,16 @@ cmake --build --preset x64-release
 
 产物：`build/x64-release/Release/taskbar-lyrics.exe`
 
+单元测试（`Config.cppm` 纯逻辑：颜色/数值解析、主题四态、托盘接管，审查修复 F1）：
+
+```bash
+cmake --preset x64-release -DTL_BUILD_TESTS=ON
+cmake --build --preset x64-release
+ctest --test-dir build/x64-release -C Release --output-on-failure
+```
+
+测试默认 OFF（`option(TL_BUILD_TESTS OFF)`），发布构建产物不含 test_config.exe。
+
 ## 使用
 
 支持两种模式：**安装模式**（推荐，musicfox 可自动拉起）与**便携模式**。
@@ -55,20 +65,58 @@ taskbarAlignment = "auto"       # 对齐：auto(自检测)/left/center/right
 taskbarFontFamily = "Microsoft YaHei UI"  # 字体
 taskbarFontSizePrimary = 14     # 原文行字号
 taskbarFontSizeSecondary = 14   # 翻译/下一行字号
-# taskbarColorPrimary = ""      # 原文颜色：留空=跟随系统主题（推荐）；0xAARRGGBB=固定覆盖
+# taskbarColorPrimary = ""      # 原文颜色：留空=跟随系统主题（推荐）；AARRGGBB=固定覆盖
 # taskbarColorSecondary = ""    # 翻译/下一行颜色：同上
 ```
 
 - `auto` 自检测：任务栏图标居中 → 歌词在左侧空档；开始按钮在左 → 歌词在中间空档
+- 颜色格式（仅十六进制，两种写法均可）：`0xAARRGGBB`（如 `0xFFFFFFFF`）或
+  裸 `AARRGGBB`（如 `FFFFFFFF`、`FF4FC3F7`）；裸/前缀的 6 位 `RRGGBB`（如 `4FC3F7`）
+  自动补不透明 alpha；其余格式（含纯十进制、其它长度）非法，被忽略且保持当前值
+  （日志有警告；go-musicfox 侧也会提前校验，非法值按留空处理并告警）
 - 颜色留空 = 本工具按 Windows 浅色/深色主题自动选色（浅色 `0xFF1A1A1A`/`0xB31A1A1A`，
   深色 `0xFFFFFFFF`）；显式设值 = 固定颜色，切主题不受影响；改回留空可取消覆盖
 - 改配置后重启 musicfox 生效
+
+### 托盘菜单与颜色接管（重要）
+
+托盘右键菜单：锁定/解锁歌词 · 跟随系统主题 · 恢复管道颜色设置 · 退出。
+
+每次在托盘操作“跟随系统主题”（无论勾选还是取消）后，本工具进入**颜色接管**状态：
+此后管道下发的颜色配置（`taskbarColorPrimary/Secondary` 的全量重放）一律被忽略，
+直到：
+
+- 在托盘菜单点“恢复管道颜色设置（解除托盘接管）”（解除后立即重放当前管道配置，
+  无需等下一行歌词），或
+- 重启本工具（接管不持久化：它是会话级决定；重启后 go 侧配置重新生效，
+  而“跟随开关”本身持久化于注册表 ThemeFollow）。
+
+没有接管机制时，托盘刚点的“跟随”会被下一行歌词的配置重放静默冲掉（已修复的感知级缺陷）。
+
+> 自动化/测试提示：菜单命令（锁定=1、解锁=2、退出=3、跟随主题=4、恢复管道颜色=5）
+> 同样响应外部 `PostMessageW(hwnd, WM_COMMAND, cmd, 0)`（窗口类名 `taskbar_lyrics`，
+> 同用户会话内本地进程可发，权限面与手动点菜单等价），便于端到端脚本验证托盘行为。
+
+### 高级配置（第三方管道客户端）
+
+本工具也接受其它命名管道客户端下发 `config.theme_follow`（"true"/"1"/"auto"/"theme" 开启，
+"false"/"0" 关闭）：go-musicfox 当前无此下发路径，该 key 供第三方客户端编程控制主题跟随；
+注意它不受颜色接管锁影响（接管只拦颜色 key）。
 
 ### 手动启动
 
 1. 启动 `taskbar-lyrics.exe`（单实例，重复启动会提示已在运行）
 2. 启动 go-musicfox（需包含歌词管道输出功能的版本，见上文配置）播放歌曲
 3. 任务栏实时显示当前歌词（外语歌含翻译）
+
+## 发布说明（版本耦合，升级须知）
+
+- **新 go-musicfox + 旧 taskbar-lyrics 会崩溃**：新版 musicfox 始终下发颜色 key（含空串，
+  用于表达“回到跟随主题”），旧版 C++ 用 `std::stoul("")` 解析会抛异常直接崩主线程。
+  两端必须配套升级到本版本之后（本 EXE 无内嵌版本字符串，以 git commit/日期区分：
+  主题跟随功能自 2026-09 提交 c0e565c 起）。
+- **旧 go-musicfox + 新 taskbar-lyrics 兼容**：旧版仅在颜色非空时下发，新版解析器
+  接受同样格式（hex），行为一致。
 
 ## 运行注意事项（MOTW）
 

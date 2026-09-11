@@ -46,3 +46,24 @@ if(MSVC)
         "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/app.manifest"
     )
 endif()
+
+# ---------------------------------------------------------------------------
+# 单元测试（审查修复 F1：测试入库为交付物）
+# option 默认 OFF：发布构建产物清单不含 test_config.exe；本地/CI 开：
+#   cmake --preset x64-release -DTL_BUILD_TESTS=ON && ctest --test-dir build/x64-release -C Release
+# test_config 仅 import plugin.Config（纯解析逻辑 + 全局 config 状态），
+# 不碰窗口/渲染/管道，console 程序可直接跑。
+# ---------------------------------------------------------------------------
+option(TL_BUILD_TESTS "Build unit tests (not part of release artifacts)" OFF)
+if(TL_BUILD_TESTS)
+    enable_testing()
+    add_executable(test_config "tests/test_config.cpp")
+    target_sources(test_config PRIVATE
+        FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        FILES
+            "src/plugin/Config.cppm"
+            "src/util/Log.cppm"
+    )
+    target_include_directories(test_config PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+    add_test(NAME config_logic COMMAND test_config)
+endif()
