@@ -23,6 +23,10 @@ public:
         RECT taskList{};
         bool centered = false;
         bool widgetsEnabled = false;
+        // 主题快照：注册表读取（微秒级，无 explorer 依赖），主线程 applyLayout
+        // 中 diff 后应用——作为 WM_SETTINGCHANGE 广播的兜底（锁屏/唤醒/
+        // 第三方工具直写注册表等错过广播的场景，2s 心跳内收敛）
+        bool lightTheme = false;
     };
 
 private:
@@ -73,6 +77,7 @@ public:
         TaskbarLayout out{};
         out.centered = Registry::isTaskbarCentered();
         out.widgetsEnabled = Registry::isWidgetsEnabled();
+        out.lightTheme = Registry::isLightTheme();
         Microsoft::WRL::ComPtr<IUIAutomation> automation{};
         if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation, &automation))) {
             return out;

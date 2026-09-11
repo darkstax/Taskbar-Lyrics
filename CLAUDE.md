@@ -19,8 +19,10 @@ cmake --preset x64-release && cmake --build --preset x64-release
 
 - 窗口样式固定组合:`WS_EX_NOPARENTNOTIFY|WS_EX_NOACTIVATE|WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_LAYERED`。
 - 点击穿透用 `WM_NCHITTEST → HTTRANSPARENT`;禁止 `WS_EX_TRANSPARENT`。
-- 透明用 D2D `HwndRenderTarget` + `LWA_COLORKEY`(黑键色 + 灰度抗锯齿),不用 DComp/UpdateLayeredWindow。
-- 菜单模态抑制 `WM_PAINT`:歌词更新/布局应用直接调 `renderer.onPaint()`。
+- 透明用 D2D `HwndRenderTarget` + `LWA_COLORKEY`(黑键色 + 灰度抗锯齿),不用 DComp/UpdateLayeredWindow;键色精确 RGB(0,0,0) → 字色禁止纯黑(显式纯黑偏移 0xFF010101)。
+- 颜色默认跟随系统主题(显式配置 > 主题默认 > 深色兜底;浅色 0xFF1A1A1A/0xB31A1A1A):`WM_SETTINGCHANGE(ImmersiveColorSet)` + 布局心跳 lightTheme 快照兜底,仅主线程应用;开关持久化 `HKCU\Software\Taskbar-Lyrics\ThemeFollow`。
+- 配置解析 from_chars 完整校验,非法输入保持当前值不崩;config 写入仅主线程。
+- 菜单模态抑制 `WM_PAINT`:歌词更新/布局应用/主题切换直接调 `renderer.onPaint()`。
 - 管道:`PIPE_NOWAIT` 非阻塞、`PeekNamedPipe` 探测断开、64KB 缓冲上限、畸形 JSON 跳过。
 - 无自动化测试;验证走人工端到端清单 + `%TEMP%\taskbar-lyrics.log`。
 

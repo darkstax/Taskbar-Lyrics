@@ -11,9 +11,10 @@ import plugin.Config;
 
 export class Lyrics {
 private:
-    // 无歌词数据（管道尚未推送）时显示的占位文本与浅灰颜色
+    // 无歌词数据（管道尚未推送）时显示的占位文本与占位色：
+    // 颜色按当前主题取（深色 0xFF9E9E9E / 浅色 0xFF767676，见 Config.cppm
+    // THEME_DARK/THEME_LIGHT.placeholder），避免浅色模式下浅灰占位不可读。
     static constexpr const wchar_t *PLACEHOLDER_TEXT = L"等待 go-musicfox…";
-    static constexpr unsigned int PLACEHOLDER_COLOR = 0xFF9E9E9E;
 
     ID2D1RenderTarget *render = nullptr;
     IDWriteFactory *dwrite = nullptr;
@@ -36,11 +37,13 @@ public:
         this->layout1.Reset();
         this->layout2.Reset();
 
-        // 无歌词数据（管道尚未推送）时绘制浅灰占位文本，避免空白窗口；
+        // 无歌词数据（管道尚未推送）时绘制占位文本（颜色随主题），避免空白窗口；
         // 占位与歌词共用同一 TextLayout 创建/绘制路径。
+        // 字色读 *_active（每帧由主题/显式覆盖解析，主线程维护）。
         const bool hasLyric = !config.lyric_primary.empty();
         const auto primaryText = hasLyric ? config.lyric_primary : Lyrics::PLACEHOLDER_TEXT;
-        const auto primaryColor = hasLyric ? config.color_primary : Lyrics::PLACEHOLDER_COLOR;
+        const auto placeholderColor = config.color_theme_light ? THEME_LIGHT.placeholder : THEME_DARK.placeholder;
+        const auto primaryColor = hasLyric ? config.color_primary_active : placeholderColor;
         const bool hasSecondary = hasLyric && !config.lyric_secondary.empty();
 
         const auto [width, height] = this->render->GetSize();
@@ -155,7 +158,7 @@ public:
         if (hasSecondary) {
             const auto align2 = centerMode ? DWRITE_TEXT_ALIGNMENT::DWRITE_TEXT_ALIGNMENT_CENTER : config.align_secondary;
             this->createText(rect2, this->format2.Get(), this->layout2, config.lyric_secondary, align2, config.underline_secondary, config.strikethrough_secondary);
-            this->drawText(rect2, this->layout2.Get(), config.color_secondary);
+            this->drawText(rect2, this->layout2.Get(), config.color_secondary_active);
         }
     }
 

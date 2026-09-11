@@ -12,6 +12,7 @@ module;
 #include <thread>
 #include <atomic>
 #include <string>
+#include <cwchar> // _wcsicmp（WM_SETTINGCHANGE 参数比较）
 
 export module window.Window;
 
@@ -62,11 +63,16 @@ private:
     // 锁定状态：锁定=透明底+点击穿透（默认）；解锁=半透明底+可拖动
     bool locked = true;
 
+    // 最近一次已应用的主题快照（仅主线程读写；applyTheme 内部 diff 用，
+    // 初值 false=深色，与 config 默认生效色一致）
+    bool lastThemeLight = false;
+
     // 托盘图标回调消息（WM_APP+4）与菜单命令 ID
     static constexpr UINT WM_TRAY = WM_APP + 4;
     static constexpr UINT IDM_LOCK = 1;
     static constexpr UINT IDM_UNLOCK = 2;
     static constexpr UINT IDM_EXIT = 3;
+    static constexpr UINT IDM_THEME_FOLLOW = 4;
 
     static auto CALLBACK WindowProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) -> LRESULT {
         if (message == WM_CREATE) [[unlikely]] {
@@ -91,10 +97,17 @@ private:
                     this->update();
                 });
                 this->renderer.onCreate(hwnd);
+                // 主题跟随初始化：读持久化开关 → 按当前主题解析生效色 →
+                // 记录快照（后续 WM_SETTINGCHANGE 与布局心跳 diff 兜底）
+                config.color_theme_follow = this->loadThemeFollow();
+                this->lastThemeLight = Registry::isLightTheme();
+                ResolveThemeColors(config);
+                Log::event(this->lastThemeLight ? L"主题初始化：浅色" : L"主题初始化：深色");
                 // 锁定状态与托盘图标
                 this->locked = this->loadLocked();
                 if (!this->locked) {
                     SetLayeredWindowAttributes(hwnd, 0, 210, LWA_ALPHA);
+                    this->renderer.setAlphaMode(true); // 解锁底色随主题（渲染路径同步）
                 }
                 this->addTrayIcon();
                 break;
@@ -126,6 +139,20 @@ private:
                 // 布局测量完成（布局线程 PostMessage）：主线程应用快照（纯算术）
                 std::lock_guard<std::mutex> lock(this->layoutMutex);
                 this->applyLayout(this->lastLayout);
+                break;
+            }
+            case WM_SETTINGCHANGE: {
+                // 主题切换通知：参数串为 "ImmersiveColorSet"（大小写不敏感）时
+                // 处理；lParam==0（部分广播不带参数）也做一次带 diff 的检查
+                // （applyTheme 幂等，无变化不重绘）。只在主线程执行。
+                if (lParam == 0) {
+                    this->applyTheme();
+                } else {
+                    const auto *area = reinterpret_cast<const wchar_t *>(lParam);
+                    if (_wcsicmp(area, L"ImmersiveColorSet") == 0) {
+                        this->applyTheme();
+                    }
+                }
                 break;
             }
             case WM_NCHITTEST: {
@@ -177,12 +204,13 @@ private:
                 break;
             }
             case WM_TRAY: {
-                // 托盘图标回调：右键弹菜单（锁定/解锁/退出）
+                // 托盘图标回调：右键弹菜单（锁定/解锁 · 跟随系统主题 · 退出）
                 if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
                     HMENU menu = CreatePopupMenu();
                     AppendMenuW(menu, MF_STRING | (this->locked ? MF_CHECKED : 0), IDM_LOCK, L"锁定歌词（透明+穿透）");
                     AppendMenuW(menu, MF_STRING | (this->locked ? 0 : MF_CHECKED), IDM_UNLOCK, L"解锁歌词（可拖动）");
                     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(menu, MF_STRING | (config.color_theme_follow ? MF_CHECKED : 0), IDM_THEME_FOLLOW, L"跟随系统主题（浅色/深色）");
                     AppendMenuW(menu, MF_STRING, IDM_EXIT, L"退出");
                     POINT pt{};
                     GetCursorPos(&pt);
@@ -193,6 +221,8 @@ private:
                         this->setLocked(true);
                     } else if (cmd == IDM_UNLOCK) {
                         this->setLocked(false);
+                    } else if (cmd == IDM_THEME_FOLLOW) {
+                        this->setThemeFollow(!config.color_theme_follow);
                     } else if (cmd == IDM_EXIT) {
                         PostMessageW(hwnd, WM_CLOSE, 0, 0);
                     }
@@ -239,6 +269,71 @@ public:
         }
     }
 
+    // 主题跟随开关持久化（注册表 HKCU\Software\Taskbar-Lyrics\ThemeFollow，
+    // REG_DWORD，仿 loadLocked/saveLocked；缺省=1 开启跟随）
+    static auto loadThemeFollow() -> bool {
+        HKEY key = nullptr;
+        DWORD value = 1; // 默认跟随系统主题
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Taskbar-Lyrics", 0, KEY_READ, &key) == ERROR_SUCCESS) {
+            DWORD size = sizeof(value);
+            DWORD type = 0;
+            if (RegQueryValueExW(key, L"ThemeFollow", nullptr, &type, reinterpret_cast<BYTE *>(&value), &size) != ERROR_SUCCESS) {
+                value = 1;
+            }
+            RegCloseKey(key);
+        }
+        return value != 0;
+    }
+
+    static auto saveThemeFollow(const bool follow) -> void {
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Taskbar-Lyrics", 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+            const auto value = follow ? 1UL : 0UL;
+            RegSetValueExW(key, L"ThemeFollow", 0, REG_DWORD, reinterpret_cast<const BYTE *>(&value), sizeof(value));
+            RegCloseKey(key);
+        }
+    }
+
+    // 主题检测应用（仅主线程）：读当前浅色/深色 → 与上次比较，变化时重解析
+    // 生效色并直接重绘（沿用 WM_APP+1 那套“直接 onPaint 绕过 WM_PAINT 抑制”
+    // 纪律）。幂等：无变化时零开销，可被广播/心跳两处安全重复调用。
+    auto applyTheme() -> void {
+        const bool light = Registry::isLightTheme();
+        const bool themeChanged = light != this->lastThemeLight;
+        const bool changed = SetThemeColors(config, light);
+        if (themeChanged) {
+            this->lastThemeLight = light;
+            Log::event(light ? L"主题切换：浅色（已应用）" : L"主题切换：深色（已应用）");
+        }
+        // 生效色变化或主题位变化都重绘（占位色只看主题位，与歌词色独立）
+        if ((changed || themeChanged) && this->hwnd != nullptr) {
+            this->renderer.onPaint();
+        }
+    }
+
+    // 托盘“跟随系统主题”开关（仅主线程）：
+    // - 勾选=允许跟随：同时清除显式颜色覆盖（回到跟随主题）；
+    // - 取消=保持当前色：把当前生效色固化为显式覆盖（否则取消后无值可用），
+    //   后续管道下发新颜色仍可覆盖此固化值。
+    auto setThemeFollow(const bool follow) -> void {
+        config.color_theme_follow = follow;
+        if (follow) {
+            config.colorPrimaryExplicit = false;
+            config.colorSecondaryExplicit = false;
+        } else {
+            config.color_primary = config.color_primary_active;
+            config.color_secondary = config.color_secondary_active;
+            config.colorPrimaryExplicit = true;
+            config.colorSecondaryExplicit = true;
+        }
+        this->saveThemeFollow(follow);
+        const auto changed = SetThemeColors(config, Registry::isLightTheme());
+        Log::event(follow ? L"托盘：开启跟随系统主题" : L"托盘：关闭跟随（保持当前色）");
+        if (changed) {
+            this->renderer.onPaint();
+        }
+    }
+
     // 切换/应用锁定状态（仅影响垂直模式：锁定=透明+穿透+自动定位，
     // 解锁=半透明底+可拖动；水平模式始终为锁定行为）
     auto setLocked(const bool locked) -> void {
@@ -247,9 +342,11 @@ public:
         if (this->verticalMode) {
             if (locked) {
                 SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+                this->renderer.setAlphaMode(false); // 回到 COLORKEY 路径：底色恒为黑
                 this->update(); // 恢复自动定位（贴边/记忆位置）
             } else {
                 SetLayeredWindowAttributes(this->hwnd, 0, 210, LWA_ALPHA);
+                this->renderer.setAlphaMode(true); // 解锁底色随主题（深色黑/浅色白）
             }
             this->renderer.onPaint();
         }
@@ -469,6 +566,10 @@ public:
         if (this->hwnd == nullptr) [[unlikely]] {
             return;
         }
+        // 主题兜底：布局快照携带主题位（锁屏/唤醒错过 WM_SETTINGCHANGE 广播时，
+        // 2s 心跳内 diff 收敛）；幂等，无变化零开销。隐藏分支前也要应用，
+        // 保证恢复可见时颜色已就位。
+        this->applyTheme();
         // 全屏隐藏/恢复：全屏且未隐藏 → SW_HIDE 并提前退出（跳过定位/重绘）；
         // 退出全屏且已隐藏 → SW_SHOWNOACTIVATE 后继续正常流程（MoveWindow 归位
         // + 末尾 onPaint 重绘）。可见性只在主线程修改（布局线程仅写 atomic 标志）。
@@ -495,8 +596,10 @@ public:
             // 垂直模式：按锁定状态应用分层属性（锁定=透明，解锁=半透明可拖）
             if (this->locked) {
                 SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+                this->renderer.setAlphaMode(false); // COLORKEY 路径，底色恒黑
             } else {
                 SetLayeredWindowAttributes(this->hwnd, 0, 210, LWA_ALPHA);
+                this->renderer.setAlphaMode(true); // 解锁底色随主题
                 // 解锁：位置自由，布局心跳不干预定位
                 this->renderer.onPaint();
                 return;
@@ -535,11 +638,11 @@ public:
             return;
         }
 
-        // 水平模式：恢复颜色键透明（点击穿透不挡任务栏）
+        // 水平模式：恢复颜色键透明（点击穿透不挡任务栏）；COLORKEY 路径，
+        // 解锁底色标记同步关闭（永远透明+穿透+自动定位，不受锁定状态影响）
         SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+        this->renderer.setAlphaMode(false);
         this->verticalMode = false;
-        // 水平模式：永远透明+穿透+自动定位（不受锁定状态影响）
-        SetLayeredWindowAttributes(this->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
         const auto &trayFrameRect = layout.tray;
         const auto &widgetsButtonRect = layout.widgets;
         const auto &taskListRect = layout.taskList;

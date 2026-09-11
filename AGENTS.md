@@ -25,7 +25,7 @@ main.cpp(wWinMain)→ Plugin::getInstance().run()(互斥锁 Local\Taskbar-Lyrics
         └── Lyrics.cppm         # DirectWrite 文本布局、字号自适应(下限 0.6)
 ```
 
-- 消息类型:`lyric`(primary/secondary 歌词)、`config`(窗口配置,全字符串);`meta`/`state` 预留。
+- 消息类型:`lyric`(primary/secondary 歌词)、`config`(窗口配置,全字符串;颜色 key 恒下发,空串=跟随主题);`meta`/`state` 预留。
 - **线程纪律**:UIAutomation/D2D 全部在主线程之外或主线程内串行;管道线程只写缓存,绝不碰 UI(避免 explorer 卡死/右键菜单清屏卡死)。
 - 关键类:`Plugin`(单例)、`Window`、`Renderer`、`Lyrics`、`LyricPipeServer`、`Taskbar`、`Handler`(UIA 事件)、`Registry`、`Log`。
 
@@ -75,7 +75,10 @@ cmake --build --preset x64-release
 - **窗口样式**:独立顶层窗口(非任务栏子窗口,避免右键菜单模态冻结合成),组合 `WS_EX_NOPARENTNOTIFY|WS_EX_NOACTIVATE|WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_LAYERED`。
 - **点击穿透**:用 `WM_NCHITTEST → HTTRANSPARENT`;**禁止用 `WS_EX_TRANSPARENT`**(实测导致命中穿透、可拖动失效);水平模式永远穿透。
 - **透明渲染**:D2D `HwndRenderTarget` 直画客户区 + `LWA_COLORKEY` 颜色键透明(黑色键色 + 灰度抗锯齿);不用 DComp/UpdateLayeredWindow(菜单模态下不可靠)。
-- **WM_PAINT 抑制**:任务栏右键菜单模态会抑制 `WM_PAINT`,歌词更新(WM_APP+1)与布局应用(WM_APP+3)直接调 `renderer.onPaint()` 绕过。
+- **颜色键透明**:锁定态 LWA_COLORKEY 键色为精确 RGB(0,0,0)——**字色禁止纯黑**(会被挖空致文字消失,用户显式指定纯黑时偏移到 0xFF010101);解锁态(LWA_ALPHA)底色随主题(深色黑/浅色白)。
+- **主题跟随**:默认字色跟随 Windows 浅色/深色(优先级:显式配置 > 主题默认 > 深色兜底;浅色 primary `0xFF1A1A1A`/secondary `0xB31A1A1A`,深色全白);检测 = 主线程 `WM_SETTINGCHANGE(ImmersiveColorSet)` + 布局心跳快照携带 lightTheme 兜底;判定键 AppsUseLightTheme 优先、SystemUsesLightTheme 回退;开关持久化 `HKCU\Software\Taskbar-Lyrics\ThemeFollow`,托盘菜单可切换。
+- **配置解析健壮性**:颜色/数值解析用 from_chars 完整校验(ParseColorValue/ParseIntValue),非法输入忽略保持当前值(不崩主线程);config 写入仅主线程。
+- **WM_PAINT 抑制**:任务栏右键菜单模态会抑制 `WM_PAINT`,歌词更新(WM_APP+1)、布局应用(WM_APP+3)与主题切换(applyTheme)直接调 `renderer.onPaint()` 绕过。
 - **全屏隐藏**:前台无边框全屏(`SHQueryUserNotificationState` + 几何兜底)时 `SW_HIDE`,退出全屏自动恢复。
 - **锁定语义**:锁定=透明底 + 穿透 + 自动定位;解锁=半透明底(LWA_ALPHA 210)+ 可拖动(仅垂直任务栏模式);状态记忆于 `HKCU\Software\Taskbar-Lyrics`。
 - **对齐**:AUTO 自检测(图标居中→左空档;开始按钮在左→中间空档),LEFT/RIGHT/CENTER。

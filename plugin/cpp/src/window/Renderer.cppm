@@ -28,8 +28,18 @@ private:
     Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory{};
     Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> d2dRenderTarget{};
     Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory{};
+    // 解锁态标记（LWA_ALPHA 路径，仅垂直任务栏解锁时为 true）：
+    // 此路径无 COLORKEY，底色可为任意值且整体半透明（alpha 210），
+    // 底色随主题取色使“浅色模式解锁”不再深底深字糊成一团；
+    // 锁定态（COLORKEY）底色永远保持精确 RGB(0,0,0)，不受此标记影响。
+    bool alphaMode = false;
 
 public:
+    // 切换解锁/锁定渲染路径（主线程，与 SetLayeredWindowAttributes 调用同步）
+    auto setAlphaMode(const bool alpha) -> void {
+        this->alphaMode = alpha;
+    }
+
     auto onCreate(const HWND hwnd) -> void {
         D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_PPV_ARGS(&this->d2dFactory));
         DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(this->dwriteFactory), &this->dwriteFactory);
@@ -60,8 +70,13 @@ public:
             this->dwriteFactory.Get()
         };
         this->d2dRenderTarget->BeginDraw();
-        // 键色背景（黑色 → LWA_COLORKEY 透明）
-        this->d2dRenderTarget->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f));
+        // 键色背景（黑色 → LWA_COLORKEY 透明）；仅解锁态（LWA_ALPHA，无键色）
+        // 底色随主题：深色保持现状黑底，浅色改白底（搭配深色文字保持可读）。
+        // 锁定分支的 Clear 色与键色一律不动（纯黑像素会被 COLORKEY 挖空）。
+        const auto lightUnlocked = this->alphaMode && config.color_theme_light;
+        this->d2dRenderTarget->Clear(lightUnlocked
+                                        ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f)
+                                        : D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f));
         lyrics.onDraw();
         this->d2dRenderTarget->EndDraw();
     }
