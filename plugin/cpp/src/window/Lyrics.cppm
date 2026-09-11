@@ -101,19 +101,31 @@ public:
             this->metrics2 = {};
         }
 
-        // 字号自适应：窗口高 = 任务栏高（约 32px），两行 14pt 文本行高约 37px，
-        // 超出时 margin 为负 → rect 溢出被 clip 裁剪（翻译两行显示不全）。
-        // 两行总高超出窗口高时按比例缩小字号（下限 0.6 倍保护可读性），重建
-        // format/layout 后重新测高；无 secondary 时仅按单行判断，同样缩放。
+        // 字号自适应（按任务栏高贴合）：窗口高 = 任务栏物理高（applyLayout 直接
+        // 取 taskbarFrame 高度），故此处直接以窗口高为目标：
+        // - 带翻译（两行）：每行分到 height/2；
+        // - 不带翻译（单行）：占满整个 height。
+        // 旧逻辑只在超出时缩小（scale<1），固定 14 号在 40px 栏上永远偏小（用户
+        // 反馈“字好小”）；现在改为双向贴合：不足则放大、超出则缩小（保留 0.6
+        // 下限保护缩小极端），主/副字号比例保持 config 设定不变。
         auto scale = 1.0f;
         const auto totalHeight = this->metrics1.height + this->metrics2.height;
-        if (totalHeight > height) {
-            scale = height / totalHeight;
+        if (totalHeight > 0.0f) {
+            // 用户方案（贴合栏高）：带翻译每行 em ≈ 栏高/2，单行 em ≈ 栏高。
+            // DWrite 自然行框 ≈1.32em，纯自然贴合（scale=height/total）只能做到
+            // em≈0.76×栏高/行，视觉仍偏小（用户反馈“还是很小”）。改为目标总高
+            // = 1.18×栏高：em ≈ 0.9×栏高/行，上下各溢出 ~9% 由窗口边缘对称裁切
+            // （CJK 主笔画在基线上方 0.88em 内不受影响；拉丁下伸部如 g/j 可能
+            // 被轻微裁切，属最大化字号的既定取舍）。
+            scale = 1.18f * height / totalHeight;
             if (scale < 0.6f) {
                 scale = 0.6f; // 最小字号保护，避免缩得太小不可读
             }
+            if (scale > 2.5f) {
+                scale = 2.5f; // 异常超高窗口保护（如垂直模式记忆位置贴大屏）
+            }
         }
-        if (scale < 1.0f) {
+        if (scale != 1.0f) {
             // 用缩放后的字号（float）重建 format（成员变量重建后，第二步
             // createText 绘制时自然生效），同参不同字号。
             const auto size1 = dipSizePrimary * scale;
@@ -155,10 +167,9 @@ public:
             }
         }
 
+        // 允许负 margin：贴合放大后文字块略高于窗口，对称居中溢出、由边缘裁切
+        //（旧 clamp≥0 会把第二行整体推出窗口底，只裁底部不裁顶部，视觉重心偏上）。
         auto margin = (height - this->metrics1.height - this->metrics2.height) / 2;
-        if (margin < 0.0f) {
-            margin = 0.0f; // 防负：总高仍超窗口时从顶部绘制，避免负 margin 溢出被裁剪
-        }
         const auto rect1 = D2D1::RectF(margin, margin, width - margin, margin + this->metrics1.height);
         D2D1_RECT_F rect2{};
         if (hasSecondary) {
