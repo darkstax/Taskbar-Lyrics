@@ -57,6 +57,13 @@ public:
         if (dpiY <= 0.f) { dpiY = 96.f; }
         const auto width = static_cast<float>(pxW) * 96.f / dpiX;
         const auto height = static_cast<float>(pxH) * 96.f / dpiY;
+        // 字号语义保持“物理像素”（与旧版一致，用户预期不变）：旧版渲染目标
+        // 恒 96DPI，size=14 即 14 物理像素行高；SetDpi 修正后 14 DIP 会变成
+        // 17.5 物理像素并触发缩小自适应（用户反馈“字好小”，实测行高 15px→12px）。
+        // 这里把 size_* 按 96/dpi 折算成 DIP，物理大小回到旧版，清晰度享受原生栅格化。
+        const auto pxToDip = 96.f / dpiY;
+        const auto dipSizePrimary = static_cast<float>(config.size_primary) * pxToDip;
+        const auto dipSizeSecondary = static_cast<float>(config.size_secondary) * pxToDip;
 
         this->dwrite->CreateTextFormat(
             config.font_family.data(),
@@ -64,7 +71,7 @@ public:
             config.weight_primary,
             config.slope_primary,
             DWRITE_FONT_STRETCH_NORMAL,
-            config.size_primary,
+            dipSizePrimary,
             L"zh-CN",
             &format1
         );
@@ -74,7 +81,7 @@ public:
             config.weight_secondary,
             config.slope_secondary,
             DWRITE_FONT_STRETCH_NORMAL,
-            config.size_secondary,
+            dipSizeSecondary,
             L"zh-CN",
             &format2
         );
@@ -109,8 +116,8 @@ public:
         if (scale < 1.0f) {
             // 用缩放后的字号（float）重建 format（成员变量重建后，第二步
             // createText 绘制时自然生效），同参不同字号。
-            const auto size1 = static_cast<float>(config.size_primary) * scale;
-            const auto size2 = static_cast<float>(config.size_secondary) * scale;
+            const auto size1 = dipSizePrimary * scale;
+            const auto size2 = dipSizeSecondary * scale;
             this->format1.Reset();
             this->dwrite->CreateTextFormat(
                 config.font_family.data(),
