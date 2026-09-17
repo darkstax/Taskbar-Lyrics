@@ -33,9 +33,11 @@ import window.Renderer;
 //   测量结果经 WM_APP+3 回主线程做纯算术 + MoveWindow。主线程消息循环
 //   永不阻塞 → 命中测试/输入始终响应 → 反复右键不会挂起桌面输入链。
 //
-// explorer 重启取舍（v1）：本窗口是 Shell_TrayWnd 的子窗口，explorer 重启
-// 会销毁本窗口，WM_DESTROY → PostQuitMessage 干净退出；v1 不实现
-// TaskbarCreated 消息监听与窗口重建，explorer 重启后由用户重新启动本工具。
+// explorer 重启取舍（v1）：本窗口是**独立顶层窗口**（非 Shell_TrayWnd 子窗口，见
+// create() 的 CreateWindowEx 注释），explorer 重启不会销毁它；布局线程每 2s 心跳都用
+// 新建的 UIA 实例重测任务栏，窗口自动归位。但托盘图标会随 explorer 重启丢失
+// （Shell_NotifyIcon 注册被销毁，v1 不处理 TaskbarCreated 重建）→ 托盘菜单不可用，
+// 需重启本工具恢复。若窗口因故销毁，仍走 WM_DESTROY → PostQuitMessage 干净退出。
 export class Window {
 private:
     HWND hwnd = nullptr;
@@ -247,7 +249,7 @@ private:
                 break;
             }
             case WM_DESTROY: {
-                // 窗口销毁 → 退出消息循环（explorer 重启等场景的干净退出路径）
+                // 窗口销毁 → 退出消息循环（干净退出路径；正常退出走 WM_CLOSE → 托盘"退出"）
                 this->removeTrayIcon();
                 PostQuitMessage(0);
                 break;

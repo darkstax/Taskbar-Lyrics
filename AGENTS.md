@@ -61,7 +61,14 @@ cmake --build --preset x64-release
 ```
 
 - 需要 VS2022 的 C++20 Modules 支持与 CMake 3.30+。
-- **无自动化测试**:验证靠人工端到端清单(IMPLEMENTATION_PLAN.md Task 5)与截图(历史 `build/phase3/smoke/`);调试日志经 `util/Log.cppm`(OutputDebugString + `%TEMP%\taskbar-lyrics.log`)。
+- **自动化测试**:`plugin/cpp/tests/test_config.cpp`(纯逻辑:颜色/数值解析、主题四态、托盘接管)默认**不编译**,需显式开:
+  ```bash
+  cmake --preset x64-release -DTL_BUILD_TESTS=ON
+  cmake --build --preset x64-release
+  ctest --test-dir build/x64-release -C Release --output-on-failure   # ctest 名 config_logic
+  ```
+  渲染/布局/窗口仍靠真机端到端验证(人工清单 + 截图比对,历史 `plugin/cpp/build/phase*/smoke/`)。
+- **调试日志**:`util/Log.cppm`(OutputDebugString + `%TEMP%\taskbar-lyrics.log`)。
 
 ## 5. 运行与部署
 
@@ -85,7 +92,7 @@ cmake --build --preset x64-release
 - **锁定语义**:锁定=透明底 + 穿透 + 自动定位;解锁=半透明底衬(位图内 alpha 210,文字保持全不透明)+ 可拖动(仅垂直任务栏模式);状态记忆于 `HKCU\Software\Taskbar-Lyrics`。
 - **对齐**:AUTO 自检测(图标居中→左空档;开始按钮在左→中间空档),LEFT/RIGHT/CENTER。
 - **管道健壮性**:`PIPE_NOWAIT` 非阻塞、`PeekNamedPipe` 探测断开、pending 缓冲 64KB 上限、畸形 JSON 跳过、config 覆盖语义(最后一次为准)。
-- v1 取舍:explorer 重启销毁窗口 → 干净退出,不实现 `TaskbarCreated` 重建(需手动重启工具)。
+- v1 取舍(explorer 重启):歌词窗口是**独立顶层窗口**(非任务栏子窗口),explorer 重启不会销毁它;布局线程每 2s 心跳都用**新建的 UIA 实例**重测任务栏,窗口自动归位,无需干预。但有两点退化:① `AddStructureChangedEventHandler` 注册在旧 explorer 元素上,结构变化事件失效(靠 2s 心跳兜底);② **托盘图标会丢失**(`Shell_NotifyIcon` 注册随 explorer 销毁),v1 不处理 `TaskbarCreated` 重建 → 重启 explorer 后托盘菜单(锁定/跟随主题/退出)不可用,需重启本工具恢复。(以上为代码分析结论,未做 explorer 重启实测。)
 
 ## 7. 开发约定
 

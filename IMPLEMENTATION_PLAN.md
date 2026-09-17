@@ -2,25 +2,39 @@
 
 > **For Hermes:** 按本计划逐任务实施，每任务完成后 git commit（中文提交信息）。
 
-> **实施状态（commit 36259b2 / b9a6d21a 基础）：** 全部 6 个 Task 已完成，另完成 Phase 5 增强（翻译推送、窗口配置下发、字号自适应、CENTER 居中语义）。要点：
+> **实施状态（截至 2026-09-17，HEAD `b1e76c4`）：** 本计划的 6 个 Task 与 Phase 5 增强全部完成；
+> 之后又陆续落地了主题跟随、托盘、垂直任务栏、全屏隐藏、单元测试与一次渲染管线重构。
+> 本文件自本状态块以下**保留为历史实施计划**，描述现状的活文档是 `README.md` / `AGENTS.md` / `CLAUDE.md`。
 >
-> - 翻译方案 A：primary=当前行原文，secondary 优先当前行翻译（LRC/YRC 双路径），无翻译时回落下一行原文；
-> - 窗口配置：`[main.lyric]` 新增 taskbarAlignment/taskbarFontFamily/taskbarFontSizePrimary/taskbarFontSizeSecondary，经管道 `config` 消息下发（值全为字符串，对齐 0/1/2/3），连接成功/重连后自动补发；
-> - 字号自适应（两行超高按比例缩小，下限 0.6）；CENTER=全宽窗口+文字居中；AUTO 自检测（TaskbarAl：开始按钮在左→中间空档，图标居中→左侧空档）；
-> - 管道断开探测：PeekNamedPipe 修复客户端断开后单实例管道被占死；NO_DATA/232 竞态日志降噪；
-> - 用户环境已升级：scoop musicfox.exe → v5.0.1-local-taskbar2，真实播放端到端验证通过。
+> 已完成（按主题，细节见 git log 与 `AGENTS.md`）：
 >
-> 历史修正记录（Phase 1 审查后）：
+> - **渲染管线重构**（`b1e76c4`，2026-09-17）：透明从 `LWA_COLORKEY` 颜色键改为「离屏 32bpp 预乘 alpha DIB +
+>   `UpdateLayeredWindow`」逐像素真透明；删除 `themeKeyRgb`/`sanitizeKeyColor` 与"字色禁止等于键色"约束；
+>   修正 `Lyrics` 的 `GetSize()` 双重换算（字号因此变大），贴合系数 1.18 → 1.0（不裁切）。
+> - **主题跟随**（`c0e565c` 起）：字色默认跟随 Windows 浅色/深色，优先级 显式配置 > 主题默认 > 深色兜底；
+>   判定键 `SystemUsesLightTheme`（任务栏跟随）优先、`AppsUseLightTheme` 回退（`c2b7119` 修正取反缺陷）。
+> - **托盘菜单**：锁定/解锁、跟随系统主题、恢复管道颜色、退出；配套会话级「托盘颜色接管锁」。
+> - **垂直任务栏适配**、**全屏自动隐藏/恢复**、**安装/卸载/洗 MOTW 脚本**。
+> - **单元测试入库**（`87789fb`）：`plugin/cpp/tests/test_config.cpp`（`-DTL_BUILD_TESTS=ON` + ctest `config_logic`）。
+>
+> Phase 5 要点（设计仍有效）：翻译方案 A（primary=当前行、secondary 优先当前行翻译，无翻译回落下一行）；
+> 窗口配置经管道 `config` 消息下发（值全为字符串，对齐 0/1/2/3，连接/重连后补发）；
+> CENTER=全宽窗口+文字居中；AUTO 自检测（`TaskbarAl`：开始按钮在左→中间空档，图标居中→左侧空档）；
+> 字号自适应（**后续改为双向贴合**：目标总高 = 1.0×栏高、下限 0.6/上限 4.0，见 `Lyrics.cppm`）；
+> 管道断开探测用 `PeekNamedPipe` 修掉"客户端断开后单实例管道被占死"。
+>
+> 历史修正记录（Task 1-6 实施期 + Phase 1 审查后，保留备查）：
 >
 > - 管道名统一为 `\\.\\pipe\\go-musicfox.lyric.v1`（与代码/README 一致，原计划中的 `\\.\\pipe\\musicfox-lyric` 已作废）；
 > - server 语义修正：stop() 置标志 + 锁内 CloseHandle 唤醒 + join，runLoop 写入 pipeHandle 后、ConnectNamedPipe 前重查 running，新句柄自灭，杜绝 join 死锁；
 > - 歌词更新收敛主线程：管道线程只写内部缓存并 PostMessageW(WM_APP+1)，主线程写 config 并重绘（不再跨线程改 config / 调 UIAutomation）；
-> - 窗口消息循环补 WM_DESTROY → PostQuitMessage 干净退出（explorer 重启后由用户重启工具，v1 不做 TaskbarCreated 重建）；
+> - 窗口消息循环补 WM_DESTROY → PostQuitMessage 干净退出。**（更正）** 原文写"explorer 重启后由用户重启工具，v1 不做 TaskbarCreated 重建"——现窗口是独立顶层窗口，explorer 重启**不销毁**窗口、布局心跳自动归位；但托盘图标会随 explorer 重启丢失，需重启工具恢复托盘菜单（见 README「已知取舍」）。
 > - 窗口创建失败检查、JSON 快速过滤健壮化（直接 parse 后按 type 判断）、pending 缓冲 64KB 上限、Config 显式包含 `<Windows.h>`。
 
 **Goal:** 把 Taskbar-Lyrics（BetterNCM 网易云客户端插件）改造为独立的 Windows 任务栏歌词工具，数据源改为 go-musicfox 的歌词输出，使 go-musicfox 播放时在 Windows 11 任务栏显示当前歌词。
 
-**Architecture:** 保留原项目 C++ 渲染/定位层（UIAutomation 定位任务栏 + D2D/DWrite 透明子窗口），砍掉 BetterNCM 插件外壳（DllMain/JS 事件通道），新增两个数据通道：(1) go-musicfox 侧加一个极简歌词输出（命名管道 `\\.\pipe\go-musicfox.lyric.v1`）；(2) 本工具 C++ 侧新增管道客户端读取并驱动渲染。go-musicfox 的 `internal/lyric/service.go` 已有 `State()` 返回当前行索引+片段，只需加个推送点。
+**Architecture:** 保留原项目 C++ 渲染/定位层（UIAutomation 定位任务栏 + D2D/DWrite 渲染），砍掉 BetterNCM 插件外壳（DllMain/JS 事件通道），新增两个数据通道：(1) go-musicfox 侧加一个极简歌词输出（命名管道 `\\.\pipe\go-musicfox.lyric.v1`）；(2) 本工具 C++ 侧新增管道客户端读取并驱动渲染。go-musicfox 的 `internal/lyric/service.go` 已有 `State()` 返回当前行索引+片段，只需加个推送点。
+（**实施时的偏离**：窗口最终是**独立顶层窗口**而非任务栏子窗口；管道方向最终是**本工具作服务端**、go-musicfox 作客户端；渲染最终是**离屏预乘 alpha + UpdateLayeredWindow**，均与本文其余部分的原始假设不同，以上方状态块与 `AGENTS.md` 为准。）
 
 **Tech Stack:** C++20 (C++ Modules, MSVC/CMake 3.30+), Direct2D/DirectWrite, Win32 UIAutomation, Go 1.26 (go-musicfox 侧)。
 
