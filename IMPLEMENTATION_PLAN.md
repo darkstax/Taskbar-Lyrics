@@ -28,7 +28,7 @@
 > - 管道名统一为 `\\.\\pipe\\go-musicfox.lyric.v1`（与代码/README 一致，原计划中的 `\\.\\pipe\\musicfox-lyric` 已作废）；
 > - server 语义修正：stop() 置标志 + 锁内 CloseHandle 唤醒 + join，runLoop 写入 pipeHandle 后、ConnectNamedPipe 前重查 running，新句柄自灭，杜绝 join 死锁；
 > - 歌词更新收敛主线程：管道线程只写内部缓存并 PostMessageW(WM_APP+1)，主线程写 config 并重绘（不再跨线程改 config / 调 UIAutomation）；
-> - 窗口消息循环补 WM_DESTROY → PostQuitMessage 干净退出。**（更正）** 原文写"explorer 重启后由用户重启工具，v1 不做 TaskbarCreated 重建"——现窗口是独立顶层窗口，explorer 重启**不销毁**窗口、布局心跳自动归位；但托盘图标会随 explorer 重启丢失，需重启工具恢复托盘菜单（见 README「已知取舍」）。
+> - 窗口消息循环补 WM_DESTROY → PostQuitMessage 干净退出。**（更正）** 原文写"explorer 重启后由用户重启工具，v1 不做 TaskbarCreated 重建"——现窗口是独立顶层窗口，explorer 重启**不销毁**窗口、布局心跳自动归位；托盘图标也已处理：收到 `TaskbarCreated` 广播即重新注册（见 README「已知取舍」）。
 > - 窗口创建失败检查、JSON 快速过滤健壮化（直接 parse 后按 type 判断）、pending 缓冲 64KB 上限、Config 显式包含 `<Windows.h>`。
 
 **Goal:** 把 Taskbar-Lyrics（BetterNCM 网易云客户端插件）改造为独立的 Windows 任务栏歌词工具，数据源改为 go-musicfox 的歌词输出，使 go-musicfox 播放时在 Windows 11 任务栏显示当前歌词。

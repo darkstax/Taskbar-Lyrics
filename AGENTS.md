@@ -92,7 +92,7 @@ cmake --build --preset x64-release
 - **锁定语义**:锁定=透明底 + 穿透 + 自动定位;解锁=半透明底衬(位图内 alpha 210,文字保持全不透明)+ 可拖动(仅垂直任务栏模式);状态记忆于 `HKCU\Software\Taskbar-Lyrics`。
 - **对齐**:AUTO 自检测(图标居中→左空档;开始按钮在左→中间空档),LEFT/RIGHT/CENTER。
 - **管道健壮性**:`PIPE_NOWAIT` 非阻塞、`PeekNamedPipe` 探测断开、pending 缓冲 64KB 上限、畸形 JSON 跳过、config 覆盖语义(最后一次为准)。
-- v1 取舍(explorer 重启):歌词窗口是**独立顶层窗口**(非任务栏子窗口),explorer 重启不会销毁它;布局线程每 2s 心跳都用**新建的 UIA 实例**重测任务栏,窗口自动归位,无需干预。但有两点退化:① `AddStructureChangedEventHandler` 注册在旧 explorer 元素上,结构变化事件失效(靠 2s 心跳兜底);② **托盘图标会丢失**(`Shell_NotifyIcon` 注册随 explorer 销毁),v1 不处理 `TaskbarCreated` 重建 → 重启 explorer 后托盘菜单(锁定/跟随主题/退出)不可用,需重启本工具恢复。(以上为代码分析结论,未做 explorer 重启实测。)
+- v1 取舍(explorer 重启):歌词窗口是**独立顶层窗口**(非任务栏子窗口),explorer 重启不会销毁它;布局线程每 2s 心跳都用**新建的 UIA 实例**重测任务栏,窗口自动归位,无需干预。① `AddStructureChangedEventHandler` 注册在旧 explorer 元素上,结构变化事件失效(靠 2s 心跳兜底,不重建);② 托盘图标随旧 shell 销毁——**已处理**:窗口收到系统广播 `TaskbarCreated` 时重新 `Shell_NotifyIconW(NIM_ADD)` 注册(同一 hWnd+uID 幂等)并立即触发一次布局重测,托盘菜单在 explorer 重启后自动恢复。(以上为代码分析结论,未做 explorer 重启实测。)
 
 ## 7. 开发约定
 

@@ -33,11 +33,12 @@ import window.Renderer;
 //   测量结果经 WM_APP+3 回主线程做纯算术 + MoveWindow。主线程消息循环
 //   永不阻塞 → 命中测试/输入始终响应 → 反复右键不会挂起桌面输入链。
 //
-// explorer 重启取舍（v1）：本窗口是**独立顶层窗口**（非 Shell_TrayWnd 子窗口，见
+// explorer 重启取舍：本窗口是**独立顶层窗口**（非 Shell_TrayWnd 子窗口，见
 // create() 的 CreateWindowEx 注释），explorer 重启不会销毁它；布局线程每 2s 心跳都用
-// 新建的 UIA 实例重测任务栏，窗口自动归位。但托盘图标会随 explorer 重启丢失
-// （Shell_NotifyIcon 注册被销毁，v1 不处理 TaskbarCreated 重建）→ 托盘菜单不可用，
-// 需重启本工具恢复。若窗口因故销毁，仍走 WM_DESTROY → PostQuitMessage 干净退出。
+// 新建的 UIA 实例重测任务栏，窗口自动归位。托盘图标也随之丢失，故窗口额外处理系统
+// 广播 `TaskbarCreated`（见 handleMessage 开头）：重新注册托盘图标 + 立即重测布局。
+// 未重建的是 UIA 结构变化事件处理器（注册在旧 explorer 元素上），由 2s 心跳兜底。
+// 若窗口因故销毁，仍走 WM_DESTROY → PostQuitMessage 干净退出。
 export class Window {
 private:
     HWND hwnd = nullptr;
@@ -77,6 +78,10 @@ private:
     static constexpr UINT IDM_THEME_FOLLOW = 4;
     static constexpr UINT IDM_TRAY_COLORS = 5; // 解除托盘接管，恢复管道颜色配置生效
 
+    // explorer 重启广播（系统级注册消息，进程启动时注册一次；返回 0 表示注册失败，
+    // 此时该分支不生效——只影响"重启 explorer 后托盘图标自动恢复"这一便利性）
+    inline static const UINT WM_TASKBARCREATED = RegisterWindowMessageW(L"TaskbarCreated");
+
     static auto CALLBACK WindowProc(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) -> LRESULT {
         if (message == WM_CREATE) [[unlikely]] {
             const auto create = reinterpret_cast<LPCREATESTRUCT>(lParam);
@@ -90,6 +95,16 @@ private:
     }
 
     auto handleMessage(const HWND hwnd, const UINT message, const WPARAM wParam, const LPARAM lParam) -> LRESULT {
+        // explorer 重启（Shell_TrayWnd 重建）后系统会广播 TaskbarCreated：托盘图标随
+        // 旧 shell 一起消失，必须重新注册。该消息是动态值，switch 前单独判。
+        if (Window::WM_TASKBARCREATED != 0 && message == Window::WM_TASKBARCREATED) {
+            // 窗口本身是独立顶层窗口，不受 explorer 重启影响；任务栏几何由布局线程
+            // 2s 心跳用新建 UIA 实例自动重测，这里只需补托盘图标 + 立即重测一次。
+            Log::event(L"收到 TaskbarCreated（explorer 重启）：重新注册托盘图标");
+            this->addTrayIcon();
+            this->update();
+            return 0;
+        }
         switch (message) {
             case WM_CREATE: {
                 this->hwnd = hwnd;
@@ -456,18 +471,24 @@ public:
         }
     }
 
-    // 托盘图标（右键菜单：锁定/解锁/退出）；图标用系统音乐图标
+    // 托盘图标（右键菜单：锁定/解锁/跟随主题/退出）。
+    // 幂等：explorer 重启后（TaskbarCreated）会再次调用，重新向新 shell 注册
+    //（内部先 NIM_DELETE 再 NIM_ADD，故两种情形都安全）。
     auto addTrayIcon() -> void {
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof(nid);
         nid.hWnd = this->hwnd;
         nid.uID = 1;
+        // 先删再加：同一 (hWnd,uID) 已存在时 NIM_ADD 会返回 E_FAIL(0x80004005)。
+        // explorer 重启后旧条目已随 shell 销毁，NIM_DELETE 无副作用（返回 FALSE 无害）。
+        Shell_NotifyIconW(NIM_DELETE, &nid);
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_TRAY;
         wcscpy_s(nid.szTip, L"Taskbar-Lyrics");
-        // 图标：优先系统音乐图标（部分环境不可用时退回应用图标）
         nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-        Shell_NotifyIconW(NIM_ADD, &nid);
+        if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
+            Log::event(L"托盘图标注册失败 (error " + std::to_wstring(GetLastError()) + L")");
+        }
     }
 
     auto removeTrayIcon() -> void {
