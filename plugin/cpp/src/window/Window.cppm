@@ -98,26 +98,23 @@ private:
                     this->update();
                 });
                 this->renderer.onCreate(hwnd);
-                // 主题先行初始化（键色随主题：浅色=白键色，applyLayeredMode 必须
-                // 在 color_theme_light 确定后调用，否则浅色启动时底色≠键色不透明）；
-                // 审查 G3：经 applyLayeredMode 成对切换，不散写（解锁分支下方会再切 ALPHA）。
-                // 主题跟随初始化：读持久化开关 → 按当前主题解析生效色 →
-                // 记录快照（后续 WM_SETTINGCHANGE 与布局心跳 diff 兜底）
+                // 主题跟随初始化：读持久化开关 → 按当前主题解析生效字色 →
+                // 记录快照（后续 WM_SETTINGCHANGE 与布局心跳 diff 兜底）。
+                // 注：主题现在只决定"字色/占位色/解锁底衬色"，不再参与键色/底色
+                // （窗口背景是真正的 alpha=0 透明，见 Renderer 顶部说明）。
                 config.color_theme_follow = this->loadThemeFollow();
                 this->lastThemeLight = Registry::isLightTheme();
-                // 审查修复 Y2/G3：先把检测到的主题同步进 config.color_theme_light
-                // （否则占位色/解锁底色在首个心跳前仍按深色默认，浅色系统首帧白字闪一下），
-                // 再解析生效色。
+                // 审查修复 Y2：先把检测到的主题同步进 config.color_theme_light
+                // （否则首帧占位色仍按深色默认，浅色系统会闪一下），再解析生效色。
                 config.color_theme_light = this->lastThemeLight;
                 ResolveThemeColors(config);
                 Log::event(this->lastThemeLight ? L"主题初始化：浅色" : L"主题初始化：深色");
-                // 默认分层模式：锁定态 COLORKEY（键色随主题：深色黑/浅色白，与
-                // Renderer::onPaint 的 Clear 色一致）
-                this->applyLayeredMode(false);
+                // 默认底衬：锁定态全透明（解锁分支下方会再设为半透明面板）
+                this->applyOverlayMode(false);
                 // 锁定状态与托盘图标
                 this->locked = this->loadLocked();
                 if (!this->locked) {
-                    this->applyLayeredMode(true); // 解锁：LWA_ALPHA 半透明底，底色随主题
+                    this->applyOverlayMode(true); // 解锁：半透明底衬（文字保持不透明）
                 }
                 this->addTrayIcon();
                 // 审查修复 Y2/G3：主题已在上方同步解析（color_theme_light +
@@ -135,7 +132,23 @@ private:
                 this->renderer.onSize(width, height, dpi);
                 break;
             }
+            case WM_DPICHANGED: {
+                // PerMonitorV2 跨屏/改缩放：lParam 为系统建议的新窗口矩形（物理像素），
+                // wParam 低位=X DPI、高位=Y DPI。离屏表面的像素尺寸必须跟着重建，
+                // 否则 ULW 的 psize 与 DIB 不一致（花屏/拉伸）。
+                const auto *suggested = reinterpret_cast<const RECT *>(lParam);
+                if (suggested != nullptr && suggested->right > suggested->left && suggested->bottom > suggested->top) {
+                    const auto width = suggested->right - suggested->left;
+                    const auto height = suggested->bottom - suggested->top;
+                    this->renderer.onSize(static_cast<UINT>(width), static_cast<UINT>(height), LOWORD(wParam));
+                    MoveWindow(hwnd, suggested->left, suggested->top, width, height, false);
+                    this->renderer.onPaint();
+                }
+                break;
+            }
             case WM_PAINT: {
+                // 窗口内容由 UpdateLayeredWindow 提交，不依赖 WM_PAINT；这里仍重发一次
+                // present（幂等、微秒级），覆盖被遮挡后重绘等系统行为。
                 this->renderer.onPaint();
                 ValidateRect(hwnd, nullptr);
                 break;
@@ -217,6 +230,8 @@ private:
                         rc.bottom - rc.top,
                         false
                     );
+                    // 拖动即移动：ULW 的位置随窗口走，必须重新 present 才跟随
+                    this->renderer.onPaint();
                 }
                 break;
             }
@@ -342,29 +357,15 @@ public:
         }
     }
 
-    // 分层模式成对切换（审查修复 G3）：SetLayeredWindowAttributes 与
-    // renderer.setAlphaMode 必须同调同步，散写易漏——统一封装：
-    // - alpha=true：解锁半透明底（LWA_ALPHA 210，底色随主题，无键色）。
-    //   注（审查 Y3）：LWA_ALPHA 路径下 crKey 传 0，依赖系统契约——flags 不含
-    //   LWA_COLORKEY 时 crKey 参数被忽略。
-    // - alpha=false：锁定 COLORKEY 路径，键色随主题（深色黑/浅色白）——必须与
-    //   Renderer::onPaint 的 Clear 色逐字节一致，否则底色无法变透明（整块实色盖住任务栏）。
-    // 仅主线程调用（与窗口消息同线程）。
-    auto applyLayeredMode(const bool alpha) -> void {
-        if (this->hwnd == nullptr) {
-            return;
-        }
-        if (alpha) {
-            SetLayeredWindowAttributes(this->hwnd, 0 /* crKey 被忽略：flags 无 LWA_COLORKEY */, 210, LWA_ALPHA);
-        } else {
-            const auto keyRgb = themeKeyRgb(config.color_theme_light);
-            SetLayeredWindowAttributes(
-                this->hwnd,
-                RGB((keyRgb >> 16) & 0xFF, (keyRgb >> 8) & 0xFF, keyRgb & 0xFF),
-                0,
-                LWA_COLORKEY);
-        }
-        this->renderer.setAlphaMode(alpha);
+    // 解锁态底衬切换（仅影响垂直任务栏模式）：
+    // - unlocked=true：底衬为 alpha 210 的半透明面板（颜色随主题），文字保持全不透明
+    //   （旧 LWA_ALPHA 会把文字一起变淡，观感更糊）；
+    // - unlocked=false：底衬全透明（锁定态＝透明底 + 穿透 + 自动定位）。
+    // 只改"下一次 present 的位图内容"参数，**不再调用 SetLayeredWindowAttributes**：
+    // 同一 WS_EX_LAYERED 窗口上它与 UpdateLayeredWindow 互斥（后调 SLWA 会夺回合成权、
+    // 丢弃逐像素 alpha）——全项目禁止再调 SLWA。仅主线程（与窗口消息同线程）。
+    auto applyOverlayMode(const bool unlocked) -> void {
+        this->renderer.setOverlayAlpha(unlocked ? 210 : 0);
     }
 
     // 主题检测应用（仅主线程）：读当前浅色/深色 → 与上次比较，变化时重解析
@@ -377,9 +378,9 @@ public:
         const bool changed = SetThemeColors(config, light);
         if (themeChanged) {
             this->lastThemeLight = light;
-            // 键色随主题（深色黑/浅色白）：COLORKEY 路径必须同步重设，否则新底色
-            // 不等于旧键色 → 底色不再透明（整块实色盖住任务栏）。
-            this->applyLayeredMode(this->verticalMode && !this->locked);
+            // 主题只影响字色/占位色/解锁底衬色（背景恒真透明），无需重设键色；
+            // 解锁态底衬颜色随主题，重设一次让下一次 present 生效。
+            this->applyOverlayMode(this->verticalMode && !this->locked);
             Log::event(light ? L"主题切换：浅色（已应用）" : L"主题切换：深色（已应用）");
         }
         // 生效色变化或主题位变化都重绘（占位色只看主题位，与歌词色独立）
@@ -444,10 +445,10 @@ public:
         this->saveLocked(locked);
         if (this->verticalMode) {
             if (locked) {
-                this->applyLayeredMode(false); // 回到 COLORKEY 路径：键色/底色随主题
+                this->applyOverlayMode(false); // 底衬全透明
                 this->update(); // 恢复自动定位（贴边/记忆位置）
             } else {
-                this->applyLayeredMode(true); // 解锁底色随主题（深色黑/浅色白）
+                this->applyOverlayMode(true); // 半透明底衬，文字保持不透明
             }
             this->renderer.onPaint();
         }
@@ -496,12 +497,11 @@ public:
         }
         this->hwnd = CreateWindowEx(
             // 独立顶层窗口（非任务栏子窗口）：右键菜单模态时 explorer 会暂停
-            // 任务栏子窗口的 DComp 合成（歌词冻结、菜单关闭后跳变），
-            // 顶层窗口不受影响；TOPMOST 保证不被任务栏遮挡，TOOLWINDOW 不进
-            // 任务栏/Alt-Tab，NOACTIVATE+HTTRANSPARENT 保证点击穿透不抢焦点。
-            // 注：GDI 渲染路径（HwndRenderTarget）不需要 NOREDIRECTIONBITMAP。
-            // LayeredWindow：TOPMOST 保证不被任务栏遮挡，TOOLWINDOW 不进
-            // 任务栏/Alt-Tab，NOACTIVATE+HTTRANSPARENT 保证点击穿透不抢焦点。
+            // 任务栏子窗口的合成（歌词冻结、菜单关闭后跳变），顶层窗口不受影响；
+            // TOPMOST 保证不被任务栏遮挡，TOOLWINDOW 不进任务栏/Alt-Tab，
+            // NOACTIVATE+HTTRANSPARENT 保证点击穿透不抢焦点。
+            // LAYERED 是 UpdateLayeredWindow 逐像素 alpha 的前提（见 Renderer 顶部说明）；
+            // 不用 WS_EX_NOREDIRECTIONBITMAP——它会让窗口走 DComp 直排路径，与 ULW 冲突。
             // 注：不用 WS_EX_TRANSPARENT——它在本系统会导致命中测试穿透
             // （可拖动模式失效），穿透由 WM_NCHITTEST 返回 HTTRANSPARENT 实现。
             WS_EX_NOPARENTNOTIFY | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
@@ -662,7 +662,7 @@ public:
         CoUninitialize();
     }
 
-    // 主线程应用布局快照：纯算术 + MoveWindow/RedrawWindow（微秒级，不阻塞）
+    // 主线程应用布局快照：纯算术 + MoveWindow + 重新 present（微秒级，不阻塞）
     auto applyLayout(const Taskbar::TaskbarLayout &layout) -> void {
         if (this->hwnd == nullptr) [[unlikely]] {
             return;
@@ -685,6 +685,8 @@ public:
         if (this->hidden_) {
             ShowWindow(this->hwnd, SW_SHOWNOACTIVATE);
             this->hidden_ = false;
+            // 恢复可见后必须由下方流程重新 present（ULW 不会因 SW_SHOW 自动重发），
+            // 否则窗口显示为空
         }
         const auto &taskbarFrame = layout.frame;
 
@@ -695,11 +697,11 @@ public:
         const auto frameH = taskbarFrame.bottom - taskbarFrame.top;
         if (frameH > frameW && frameW > 0 && frameH > 0) {
             this->verticalMode = true;
-            // 垂直模式：按锁定状态应用分层属性（锁定=透明，解锁=半透明可拖）
+            // 垂直模式：底衬按锁定状态切换（锁定=全透明，解锁=半透明面板可拖）
             if (this->locked) {
-                this->applyLayeredMode(false); // COLORKEY 路径，底色恒黑
+                this->applyOverlayMode(false);
             } else {
-                this->applyLayeredMode(true); // 解锁底色随主题
+                this->applyOverlayMode(true);
                 // 解锁：位置自由，布局心跳不干预定位
                 this->renderer.onPaint();
                 return;
@@ -733,14 +735,14 @@ public:
             }
             const auto w = min(lyricW, max(0L, screenW - posX - gap));
             MoveWindow(this->hwnd, posX, posY, w, lyricH, false);
-            RedrawWindow(this->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            // 位置/尺寸变化后必须重新 present：ULW 的 pptDst/psize 就是它与窗口的对齐依据
             this->renderer.onPaint();
             return;
         }
 
-        // 水平模式：恢复颜色键透明（点击穿透不挡任务栏）；COLORKEY 路径，
-        // 解锁底色标记同步关闭（永远透明+穿透+自动定位，不受锁定状态影响）
-        this->applyLayeredMode(false);
+        // 水平模式：底衬全透明（点击穿透不挡任务栏）；解锁底衬标记同步关闭
+        //（永远透明+穿透+自动定位，不受锁定状态影响）
+        this->applyOverlayMode(false);
         this->verticalMode = false;
         const auto &trayFrameRect = layout.tray;
         const auto &widgetsButtonRect = layout.widgets;
@@ -795,8 +797,8 @@ public:
 
         BringWindowToTop(this->hwnd);
         MoveWindow(this->hwnd, offset, posY, width, height, false);
-        RedrawWindow(this->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-        // LayeredWindow 首次显示与位置变化后需要主动提交位图（WM_PAINT 不保证触发）
+        // 位置/尺寸变化后必须重新提交位图（ULW 的 pptDst/psize 与窗口对齐；
+        // 隐藏后恢复可见也走这里）
         this->renderer.onPaint();
     }
 };

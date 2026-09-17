@@ -9,6 +9,17 @@ export module window.Lyrics;
 
 import plugin.Config;
 
+// 渲染目标元数据（由 Renderer 显式传入，取代旧代码对 RT 的 GetSize()/GetDpi() 查询）：
+// - pxW/pxH 是**物理像素**（离屏 DIB 尺寸 = 窗口尺寸），dpi 是窗口 DPI；
+// - 显式传入的原因：ID2D1RenderTarget::GetSize() 的语义随 RT 类型而异（文档规定返回 DIP，
+//   而旧代码把它当物理像素再乘一次 96/dpi，等于做了两次换算，非 96DPI 下文字盒只有
+//   实际宽度的 (96/dpi)² —— 本次修正为单次换算，并把这个边界收敛到 Renderer 一处。
+export struct RenderMetrics {
+    unsigned int pxW = 0;
+    unsigned int pxH = 0;
+    unsigned int dpi = 96;
+};
+
 export class Lyrics {
 private:
     // 无歌词数据（管道尚未推送）时显示的占位文本与占位色：
@@ -18,6 +29,7 @@ private:
 
     ID2D1RenderTarget *render = nullptr;
     IDWriteFactory *dwrite = nullptr;
+    RenderMetrics metrics{};
     Microsoft::WRL::ComPtr<IDWriteTextFormat> format1{};
     Microsoft::WRL::ComPtr<IDWriteTextFormat> format2{};
     Microsoft::WRL::ComPtr<IDWriteTextLayout> layout1{};
@@ -26,9 +38,10 @@ private:
     DWRITE_TEXT_METRICS metrics2{};
 
 public:
-    Lyrics(ID2D1RenderTarget *render, IDWriteFactory *dwrite) {
+    Lyrics(ID2D1RenderTarget *render, IDWriteFactory *dwrite, const RenderMetrics &metrics) {
         this->render = render;
         this->dwrite = dwrite;
+        this->metrics = metrics;
     }
 
     auto onDraw() -> void {
@@ -46,21 +59,16 @@ public:
         const auto primaryColor = hasLyric ? config.color_primary_active : placeholderColor;
         const bool hasSecondary = hasLyric && !config.lyric_secondary.empty();
 
-        const auto [pxW, pxH] = this->render->GetSize();
-        // 单位换算（配合 Renderer 的 SetDpi 修正）：GetSize 返回物理像素，而
-        // DWrite/D2D 绘制坐标是 DIP（= 物理像素 × 96/dpi）。旧代码在默认
-        // 96DPI 下两者数值巧合相等；修正渲染目标 DPI 后必须换算，否则
-        // 布局高度按物理像素算会溢出 DIP 实际可用高（文字被 clip/居中错位）。
-        float dpiX = 96.f, dpiY = 96.f;
-        this->render->GetDpi(&dpiX, &dpiY);
-        if (dpiX <= 0.f) { dpiX = 96.f; }
-        if (dpiY <= 0.f) { dpiY = 96.f; }
-        const auto width = static_cast<float>(pxW) * 96.f / dpiX;
-        const auto height = static_cast<float>(pxH) * 96.f / dpiY;
-        // 字号语义保持“物理像素”（与旧版一致，用户预期不变）：旧版渲染目标
-        // 恒 96DPI，size=14 即 14 物理像素行高；SetDpi 修正后 14 DIP 会变成
-        // 17.5 物理像素并触发缩小自适应（用户反馈“字好小”，实测行高 15px→12px）。
-        // 这里把 size_* 按 96/dpi 折算成 DIP，物理大小回到旧版，清晰度享受原生栅格化。
+        // 尺寸来源：Renderer 显式传入的物理像素 + 窗口 DPI（不再查 GetSize()/GetDpi()）。
+        // DWrite/D2D 绘制坐标是 DIP（= 物理像素 × 96/dpi），故这里做**单次**换算。
+        // （历史缺陷：旧代码把 GetSize() 的 DIP 当物理像素又乘一次 96/dpi，非 96DPI 下
+        //   文字盒只有实际尺寸的 (96/dpi)²，字号自适应因此系统性偏小；已修正。）
+        const auto dpiX = static_cast<float>(this->metrics.dpi > 0 ? this->metrics.dpi : 96);
+        const auto dpiY = dpiX;
+        const auto width = static_cast<float>(this->metrics.pxW) * 96.f / dpiX;
+        const auto height = static_cast<float>(this->metrics.pxH) * 96.f / dpiY;
+        // 字号语义保持“物理像素”（与旧版一致，用户预期不变）：size=14 即 14 物理像素行高。
+        // 这里把 size_* 按 96/dpi 折算成 DIP，物理大小保持不变，清晰度享受原生栅格化。
         const auto pxToDip = 96.f / dpiY;
         const auto dipSizePrimary = static_cast<float>(config.size_primary) * pxToDip;
         const auto dipSizeSecondary = static_cast<float>(config.size_secondary) * pxToDip;
@@ -102,22 +110,20 @@ public:
         }
 
         // 字号自适应（按任务栏高贴合）：窗口高 = 任务栏物理高（applyLayout 直接
-        // 取 taskbarFrame 高度），故此处直接以窗口高为目标：
-        // - 带翻译（两行）：每行分到 height/2；
+        // 取 Appbar 完整矩形），故此处直接以窗口高为目标：
+        // - 带翻译（两行）：两行合计占满 height；
         // - 不带翻译（单行）：占满整个 height。
-        // 旧逻辑只在超出时缩小（scale<1），固定 14 号在 40px 栏上永远偏小（用户
-        // 反馈“字好小”）；现在改为双向贴合：不足则放大、超出则缩小（保留 0.6
-        // 下限保护缩小极端），主/副字号比例保持 config 设定不变。
+        // 双向贴合：不足则放大、超出则缩小（0.6 下限保护极端、4.0 上限保护异常窗口），
+        // 主/副字号比例保持 config 设定不变（注意：双向贴合下 size_* 只决定两行比例，
+        // 绝对大小由本系数决定）。
+        // 目标总高 = 1.0 × height：恰好贴合、不裁切。
+        // 历史：系数曾是 1.18（意图"em≈0.9×栏高/行"），但那是建立在 GetSize 双次换算
+        // 得到的偏小高度上的；修正为单次换算后 1.18 会让上下各溢出 ~9%，实测拉丁 g/j
+        // 下伸部与 CJK 顶部被切，故回到 1.0。
         auto scale = 1.0f;
         const auto totalHeight = this->metrics1.height + this->metrics2.height;
         if (totalHeight > 0.0f) {
-            // 用户方案（贴合栏高）：带翻译每行 em ≈ 栏高/2，单行 em ≈ 栏高。
-            // DWrite 自然行框 ≈1.32em，纯自然贴合（scale=height/total）只能做到
-            // em≈0.76×栏高/行，视觉仍偏小（用户反馈“还是很小”）。改为目标总高
-            // = 1.18×栏高：em ≈ 0.9×栏高/行，上下各溢出 ~9% 由窗口边缘对称裁切
-            // （CJK 主笔画在基线上方 0.88em 内不受影响；拉丁下伸部如 g/j 可能
-            // 被轻微裁切，属最大化字号的既定取舍）。
-            scale = 1.18f * height / totalHeight;
+            scale = height / totalHeight;
             if (scale < 0.6f) {
                 scale = 0.6f; // 最小字号保护，避免缩得太小不可读
             }

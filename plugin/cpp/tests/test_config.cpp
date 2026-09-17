@@ -3,11 +3,11 @@
 // 构建：cmake -DTL_BUILD_TESTS=ON → ctest 或直接运行 test_config.exe。
 // 默认不纳入发布构建（option(TL_BUILD_TESTS OFF)），避免发布包混入测试 exe。
 //
-// 覆盖矩阵（与上一轮审查清单对应）：
+// 覆盖矩阵（与审查清单对应）：
 //   R1  ParseColorValue：0x 前缀 / 8 位裸 hex / 6 位补 alpha / 非法输入拒绝 /
 //       空串与 theme/auto 清除覆盖 / 纯十进制不再接受
-//   R1  sanitizeKeyColor：纯黑偏移（0xFF000000→0xFF010101、0x80000000→alpha 保留）
-//   主题 ResolveThemeColors / SetThemeColors：follow+explicit 四态转移、冻结语义
+//   主题 ResolveThemeColors / SetThemeColors：follow+explicit 四态转移、冻结语义、
+//       显式色按原值生效（含纯黑/纯白，不再有键色偏移保护）
 //   Y1  托盘接管：lockedByTray 后管道重放显式色/清除串均被忽略；解除后恢复生效
 //   R1  非法输入保持当前值（经 setConfig 全链路）
 //   加固 ParseIntValue：合法/非法/越界/尾随垃圾/超长
@@ -91,24 +91,6 @@ auto test_parse_color() -> void {
     CHECK(!ParseColorValue("0XZZZZZZ", c, ex));
 }
 
-// ---- 键色挖空保护（sanitizeKeyColor，键色随主题：深色=黑/浅色=白）----
-auto test_sanitize() -> void {
-    // 深色主题（键色黑）：纯黑偏移，白字不受影响
-    CHECK_EQ(sanitizeKeyColor(0xFF000000u, false), 0xFF010101u); // alpha 保留，RGB 偏移
-    CHECK_EQ(sanitizeKeyColor(0x80000000u, false), 0x80010101u);
-    CHECK_EQ(sanitizeKeyColor(0x00000000u, false), 0x00010101u);
-    CHECK_EQ(sanitizeKeyColor(0xFF000001u, false), 0xFF000001u); // 非纯黑不动
-    CHECK_EQ(sanitizeKeyColor(0xFFFFFFFFu, false), 0xFFFFFFFFu); // 深色键色=黑，白字安全
-    // 浅色主题（键色白）：纯白偏移至 0xFEFEFE，黑字不受影响
-    CHECK_EQ(sanitizeKeyColor(0xFFFFFFFFu, true), 0xFFFEFEFEu);
-    CHECK_EQ(sanitizeKeyColor(0x80FFFFFFu, true), 0x80FEFEFEu);
-    CHECK_EQ(sanitizeKeyColor(0xFF1A1A1Au, true), 0xFF1A1A1Au); // 浅色默认深字安全
-    CHECK_EQ(sanitizeKeyColor(0xFF000000u, true), 0xFF000000u); // 浅色键色=白，黑字安全
-    // 主题键色单一真相源
-    CHECK_EQ(themeKeyRgb(false), 0x00000000u);
-    CHECK_EQ(themeKeyRgb(true), 0x00FFFFFFu);
-}
-
 // ---- follow + explicit 四态转移（ResolveThemeColors / SetThemeColors）----
 auto test_theme_states() -> void {
     ResetConfigForTest(); // 默认：follow=true, light=false, 无显式覆盖
@@ -132,12 +114,18 @@ auto test_theme_states() -> void {
     // 态4：explicit 覆盖优先于主题：固化后切深色主题不变
     config.colorPrimaryExplicit = true; // color_primary 保持固化值
     CHECK(SetThemeColors(config, false));
-    CHECK_EQ(config.color_primary_active, sanitizeKeyColor(config.color_primary, config.color_theme_light));
+    CHECK_EQ(config.color_primary_active, config.color_primary);
 
-    // explicit 纯黑保护：固化纯黑 → 生效色偏移至 0x010101 级
+    // 显式纯黑按原值生效（逐像素 alpha 下不存在键色挖空，不再偏移成 0x010101）
     config.color_primary = 0xFF000000u;
     ResolveThemeColors(config);
-    CHECK_EQ(config.color_primary_active, 0xFF010101u);
+    CHECK_EQ(config.color_primary_active, 0xFF000000u);
+    // 显式纯白同理（浅色主题下曾必须偏移以逃过白键色）
+    config.color_primary = 0xFFFFFFFFu;
+    config.color_theme_light = true;
+    ResolveThemeColors(config);
+    CHECK_EQ(config.color_primary_active, 0xFFFFFFFFu);
+    config.color_theme_light = false;
 
     // 清除 explicit 且 follow=true → 回到主题默认（深色白）
     config.colorPrimaryExplicit = false;
@@ -165,8 +153,8 @@ auto test_set_config_colors() -> void {
     CHECK(!config.colorPrimaryExplicit);
     CHECK_EQ(config.color_primary_active, config.color_theme_light ? THEME_LIGHT.primary : THEME_DARK.primary);
 
-    setConfig("color_secondary", "0xFF000000"); // 显式纯黑 → 偏移保护
-    CHECK_EQ(config.color_secondary_active, 0xFF010101u);
+    setConfig("color_secondary", "0xFF000000"); // 显式纯黑 → 按原值生效（无键色可撞）
+    CHECK_EQ(config.color_secondary_active, 0xFF000000u);
 
     setConfig("theme_follow", "false"); // 关闭跟随 → 冻结
     CHECK(!config.color_theme_follow);
@@ -239,7 +227,6 @@ auto test_parse_int() -> void {
 
 auto main() -> int {
     test_parse_color();
-    test_sanitize();
     test_theme_states();
     test_set_config_colors();
     test_tray_takeover();

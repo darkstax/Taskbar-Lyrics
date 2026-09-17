@@ -30,13 +30,13 @@ target_sources(taskbar-lyrics PRIVATE
 
 target_include_directories(taskbar-lyrics PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
+# 只链接实际用到的库：d2d1/dwrite（离屏渲染）、shell32（托盘 / 全屏状态查询）。
+# d3d11/dxgi/dcomp 是早期 DComp 方案的遗留链接；现在走"内存 DIB + UpdateLayeredWindow
+# 逐像素 alpha"，不需要图形设备（user32/gdi32 由 MSVC 默认链接集提供）。
 target_link_libraries(taskbar-lyrics PRIVATE
-    d3d11
     d2d1
     dwrite
-    dxgi
-    dcomp
-    shell32 # SHQueryUserNotificationState
+    shell32 # SHQueryUserNotificationState / Shell_NotifyIconW
 )
 
 if(MSVC)

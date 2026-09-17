@@ -27,12 +27,12 @@ export enum TASKBAR_WINDOW_ALIGNMENT {
     TASKBAR_WINDOW_ALIGNMENT_RIGHT
 };
 
-// 主题默认色（产品决策硬约束）：
-// - 禁止纯黑 RGB(0,0,0) 字色：锁定态 LWA_COLORKEY 键色为精确 RGB(0,0,0)，
-//   纯黑像素会被整块挖空导致文字消失（见 Renderer.cppm onCreate 的键色设置）。
+// 主题默认色（产品决策）：
 // - 浅色主题 primary 0xFF1A1A1A / secondary 0xB31A1A1A（次级比主级浅一档，
-//   与深色模式的层次一致）；深色主题保持全白 0xFFFFFFFF（完全维持现状观感）。
-// - 占位色：深色 0xFF9E9E9E（现状）/ 浅色 0xFF767676。
+//   与深色模式的层次一致）；深色主题保持全白 0xFFFFFFFF（维持既有观感）。
+// - 占位色：深色 0xFF9E9E9E / 浅色 0xFF767676。
+// 注：这里只决定**字色/占位色/解锁底衬色**——窗口背景是真正的逐像素 alpha 透明
+// （见 window.Renderer），不存在"键色"，因此不再有"字色禁止等于底色"这类约束。
 export struct ThemeColors {
     unsigned int primary;
     unsigned int secondary;
@@ -89,40 +89,21 @@ export struct Config {
     DWRITE_TEXT_ALIGNMENT align_secondary = DWRITE_TEXT_ALIGNMENT::DWRITE_TEXT_ALIGNMENT_LEADING;
 } config;
 
-// 当前主题的 COLORKEY 键色 RGB（LWA_COLORKEY 对键色做精确匹配）：
-// 深色主题=黑（现状），浅色主题=白。导出供渲染层与测试共用，保证
-// “挖空色”与“保护判据”单一真相源。
-export inline auto themeKeyRgb(const bool light) -> unsigned int {
-    return light ? 0x00FFFFFFu : 0x00000000u;
-}
-
-// 用户显式色保护：RGB 精确等于当前键色的像素会被 COLORKEY 挖空（文字不可见），
-// 向反方向偏移到 0x010101 / 0xFEFEFE（肉眼不可辨）；alpha 不参与键色比较，保持原样。
-// 浅色主题键色为白，因此纯白（如用户配 FFFFFFFF 白字）也必须保护，否则文字直接消失。
-// 导出以便单元测试覆盖（纯逻辑，无 OS 依赖）。
-export inline auto sanitizeKeyColor(const unsigned int argb, const bool light) -> unsigned int {
-    const auto rgb = argb & 0x00FFFFFFu;
-    if (rgb == themeKeyRgb(light)) {
-        // 深色（键色黑）→ 提亮一档；浅色（键色白）→ 压暗一档
-        const auto shifted = light ? 0x00FEFEFEu : 0x00010101u;
-        return (argb & 0xFF000000u) | shifted;
-    }
-    return argb;
-}
-
 // 按当前主题重解析生效色。优先级：用户显式覆盖 > 主题跟随默认 > 冻结。
-// - explicit=true：生效色 = 显式值（COLORKEY 保护后），主题切换不影响；
+// - explicit=true：生效色 = 显式值，主题切换不影响；
 // - explicit=false 且 follow=true：生效色 = 当前主题默认；
 // - explicit=false 且 follow=false：冻结，保持现有生效色不变（托盘取消勾选语义）。
 // 只在主线程调用（config 写入全部收敛主线程的既有约定）。
+// 注：历史上有 sanitizeKeyColor 把"恰好等于颜色键"的字色偏移一档以逃过 LWA_COLORKEY
+// 挖空；现在窗口是逐像素 alpha 透明、不存在键色，显式色按原值生效（含纯黑/纯白）。
 export auto ResolveThemeColors(Config &cfg) -> void {
     if (cfg.colorPrimaryExplicit) {
-        cfg.color_primary_active = sanitizeKeyColor(cfg.color_primary, cfg.color_theme_light);
+        cfg.color_primary_active = cfg.color_primary;
     } else if (cfg.color_theme_follow) {
         cfg.color_primary_active = cfg.color_theme_light ? THEME_LIGHT.primary : THEME_DARK.primary;
     }
     if (cfg.colorSecondaryExplicit) {
-        cfg.color_secondary_active = sanitizeKeyColor(cfg.color_secondary, cfg.color_theme_light);
+        cfg.color_secondary_active = cfg.color_secondary;
     } else if (cfg.color_theme_follow) {
         cfg.color_secondary_active = cfg.color_theme_light ? THEME_LIGHT.secondary : THEME_DARK.secondary;
     }
