@@ -22,7 +22,7 @@ main.cpp(wWinMain)→ Plugin::getInstance().run()(互斥锁 Local\Taskbar-Lyrics
 └── 主线程                      # 歌词写入/窗口重绘全部收敛于此(永不阻塞)
         ├── Window.cppm         # 顶层透明窗口、布局、全屏隐藏
         ├── Renderer.cppm       # 离屏 32bpp 预乘 alpha DIB + UpdateLayeredWindow 逐像素透明
-        └── Lyrics.cppm         # DirectWrite 文本布局、字号双向贴合(下限 0.6/上限 4.0)
+        └── Lyrics.cppm         # DirectWrite 文本布局、字号双向贴合(下限 0.6/上限 4.0)、固定双行排版
 ```
 
 - 消息类型:`lyric`(primary/secondary 歌词)、`config`(窗口配置,全字符串;颜色 key 恒下发,空串=跟随主题);`meta`/`state` 预留。

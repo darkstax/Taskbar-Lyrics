@@ -101,18 +101,18 @@ public:
         this->dwrite->CreateTextLayout(primaryText.data(), static_cast<UINT32>(primaryText.size()), this->format1.Get(), width, height, &this->layout1);
         this->layout1->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         this->layout1->GetMetrics(&this->metrics1);
-        if (hasSecondary) {
-            this->dwrite->CreateTextLayout(config.lyric_secondary.data(), static_cast<UINT32>(config.lyric_secondary.size()), this->format2.Get(), width, height, &this->layout2);
-            this->layout2->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            this->layout2->GetMetrics(&this->metrics2);
-        } else {
-            this->metrics2 = {};
-        }
+        // 第二行**始终**参与排版：无翻译时用同一段原文按 secondary 格式量一个行高，
+        // 作为"下半行"占位（不绘制）。这样字号与位置在有翻译/无翻译之间完全一致
+        //（用户要求：无论如何都按双行排，单行时占上面那一行）。
+        const auto &secondaryText = hasSecondary ? config.lyric_secondary : primaryText;
+        this->dwrite->CreateTextLayout(secondaryText.data(), static_cast<UINT32>(secondaryText.size()), this->format2.Get(), width, height, &this->layout2);
+        this->layout2->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        this->layout2->GetMetrics(&this->metrics2);
 
         // 字号自适应（按任务栏高贴合）：窗口高 = 任务栏物理高（applyLayout 直接
-        // 取 Appbar 完整矩形），故此处直接以窗口高为目标：
-        // - 带翻译（两行）：两行合计占满 height；
-        // - 不带翻译（单行）：占满整个 height。
+        // 取 Appbar 完整矩形），故此处直接以窗口高为目标：**始终按两行排**——
+        // 有翻译时两行各占一半；无翻译时第一行占上半、下半留空（不绘制），
+        // 因此字号与位置不会因为"有/无翻译"而跳变。
         // 双向贴合：不足则放大、超出则缩小（0.6 下限保护极端、4.0 上限保护异常窗口），
         // 主/副字号比例保持 config 设定不变（注意：双向贴合下 size_* 只决定两行比例，
         // 绝对大小由本系数决定）。
@@ -147,30 +147,27 @@ public:
                 L"zh-CN",
                 &this->format1
             );
-            if (hasSecondary) {
-                this->format2.Reset();
-                this->dwrite->CreateTextFormat(
-                    config.font_family.data(),
-                    nullptr,
-                    config.weight_secondary,
-                    config.slope_secondary,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    size2,
-                    L"zh-CN",
-                    &this->format2
-                );
-            }
+            // 第二行始终重建/重测（无翻译时它是"下半行占位"，影响 margin 与 scale）
+            this->format2.Reset();
+            this->dwrite->CreateTextFormat(
+                config.font_family.data(),
+                nullptr,
+                config.weight_secondary,
+                config.slope_secondary,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size2,
+                L"zh-CN",
+                &this->format2
+            );
             // 重建布局并重新测高（缩放后两行总高应 ≤ 窗口高）
             this->layout1.Reset();
             this->dwrite->CreateTextLayout(primaryText.data(), static_cast<UINT32>(primaryText.size()), this->format1.Get(), width, height, &this->layout1);
             this->layout1->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             this->layout1->GetMetrics(&this->metrics1);
-            if (hasSecondary) {
-                this->layout2.Reset();
-                this->dwrite->CreateTextLayout(config.lyric_secondary.data(), static_cast<UINT32>(config.lyric_secondary.size()), this->format2.Get(), width, height, &this->layout2);
-                this->layout2->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                this->layout2->GetMetrics(&this->metrics2);
-            }
+            this->layout2.Reset();
+            this->dwrite->CreateTextLayout(secondaryText.data(), static_cast<UINT32>(secondaryText.size()), this->format2.Get(), width, height, &this->layout2);
+            this->layout2->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            this->layout2->GetMetrics(&this->metrics2);
         }
 
         // 允许负 margin：贴合放大后文字块略高于窗口，对称居中溢出、由边缘裁切
